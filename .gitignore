@@ -5,9 +5,45 @@ build/
 dist/
 wheels/
 *.egg-info
-.DS_Store/
-.DS_Store
+*.egg
 
 # Virtual environments
 .venv
 .venv/
+
+# OS files
+.DS_Store
+.DS_Store/
+Thumbs.db
+*.swp
+*.swo
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-*
+
+# Environment files (may contain secrets)
+.env
+.env.local
+.env.*.local
+*.env
+
+# Test/debug files (not part of the app)
+check_bulk_js.py
+check_fetch.py
+check_server.py
+test_mercari_lib.py
+test_search.py
+bulk_test.js
+served_bulk.js
+served_final.js
+served_test.js
+
+# Logs
+*.log
+
+# Compiled/binary files
+temp_download/*.tar.gz
+temp_download/*.zip
+temp_download/*.gz

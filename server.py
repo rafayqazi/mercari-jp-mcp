@@ -1,11 +1,14 @@
 from typing import Any, Dict, List, Optional
-from mercari import (MercariOrder, MercariSearchStatus, MercariSort, search)
+from mercari import (
+    MercariOrder, MercariSearchStatus, MercariSort,
+    search, getItemInfo
+)
 from pydantic import Field
 from fastmcp import FastMCP
 
-mercari_mcp = FastMCP(name="MercariSearchComplete", dependencies=["mercari"])
+mercari_mcp = FastMCP(name="MercariSearchComplete")
 
-@mercari_mcp.tool(name="search_mercari_jp", 
+@mercari_mcp.tool(name="search_mercari_jp",
                 description="""Search Mercari for items, excluding keywords and filtering by price and specific model name.
                 Args:
                     keyword (str): The main keyword to search for (e.g., 'iPhone15 Pro 256GB'). Optimize this to ensure the product name is correct, sometimes it has to be in Japanese.
@@ -20,17 +23,6 @@ def search_mercari_items_filtered(
     max_price: Optional[int] = Field(None, description="Maximum price in JPY.", ge=0),
     limit: int = Field(20, description="Maximum number of items to return.", ge=1)
 ) -> List[Dict[str, Any]]:
-    """
-    Performs a search on Mercari Japan using a keyword, excluding specified keywords,
-    and filtering results by the provided price range.
-    Additionally filters results based on keywords derived from the input keyword
-    and exclude_keywords to ensure the product name closely matches the desired model.
-    Uses default sorting (price ascending) and only shows items on sale.
-
-    Returns:
-        A list of dictionaries for items matching all criteria, limited to the specified number.
-        Returns an empty list if no items are found or an error occurs.
-    """
     try:
         search_results = search(
             keyword,
@@ -45,7 +37,6 @@ def search_mercari_items_filtered(
         unwanted_terms_from_input = [term.lower() for term in exclude_keywords.split()]
         all_unwanted_terms = list(set(unwanted_terms_from_input))
         all_unwanted_terms = [term for term in all_unwanted_terms if term not in required_terms]
-
 
         for item in search_results:
             try:
@@ -74,11 +65,27 @@ def search_mercari_items_filtered(
                     max_check_passed = (max_price is None) or (price <= max_price)
 
                     if min_check_passed and max_check_passed:
-                        items_found.append({
+                        full_info = None
+                        try:
+                            full_info = getItemInfo(item.id)
+                        except Exception:
+                            pass
+
+                        item_dict = {
                             "name": product_name,
                             "url": getattr(item, 'productURL', 'N/A'),
                             "price": price,
-                        })
+                            "image_url": getattr(item, 'imageURL', 'N/A'),
+                        }
+
+                        if full_info is not None:
+                            if hasattr(full_info, 'item_condition') and full_info.item_condition is not None:
+                                item_dict["item_condition"] = full_info.item_condition.name
+                            if hasattr(full_info, 'seller') and full_info.seller is not None:
+                                item_dict["seller_name"] = full_info.seller.name
+                                item_dict["seller_reviews"] = full_info.seller.num_ratings
+
+                        items_found.append(item_dict)
 
                         if len(items_found) >= limit:
                             break
