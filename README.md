@@ -34,13 +34,24 @@ A Python application to search Mercari Japan products with a Web GUI. Supports b
 
 ## Usage
 
-### Web GUI (Recommended)
+### Web GUI (Flask Application — Recommended)
+
+Run the built-in Flask web server:
 
 ```bash
 uv run mercari_gui.py
 ```
 
-Open `http://127.0.0.1:5000` in your browser.
+Then open **http://127.0.0.1:5000** in your browser.
+
+**Windows users** can also double-click `start_gui.bat` to launch directly.
+
+The GUI has two tabs:
+
+- **Simple Search** — Single keyword with price range, exclude keywords, status/condition filters
+- **Bulk Search** — Paste multiple keywords (one per line) or upload a `.txt` / `.csv` / `.xlsx` file. Filter by status, condition, and seller review count (min/max). Results are grouped by keyword and can be exported as CSV.
+
+Click **Description** on any result to view item details and auto-translate the description from Japanese to English. Click **View** to open the item on Mercari Japan.
 
 ### MCP Server (for Claude Desktop)
 
