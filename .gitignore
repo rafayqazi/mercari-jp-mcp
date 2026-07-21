@@ -47,3 +47,12 @@ served_test.js
 temp_download/*.tar.gz
 temp_download/*.zip
 temp_download/*.gz
+
+# Temporary/test files
+temp_script.js
+test_js.js
+test_output*.html
+yahoo_item_detail.html
+
+# Lock files (not used with uv)
+uv.lock

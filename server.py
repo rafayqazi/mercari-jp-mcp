@@ -1,7 +1,7 @@
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 from mercari import (
     MercariOrder, MercariSearchStatus, MercariSort,
-    search, getItemInfo
+    search
 )
 from pydantic import Field
 from fastmcp import FastMCP
@@ -22,17 +22,18 @@ def search_mercari_items_filtered(
     min_price: Optional[int] = Field(None, description="Minimum price in JPY.", ge=0),
     max_price: Optional[int] = Field(None, description="Maximum price in JPY.", ge=0),
     limit: int = Field(20, description="Maximum number of items to return.", ge=1)
-) -> List[Dict[str, Any]]:
+) -> str:
     try:
         search_results = search(
             keyword,
             sort=MercariSort.SORT_SCORE,
             order=MercariOrder.ORDER_DESC,
             status=MercariSearchStatus.ON_SALE,
-            exclude_keywords=exclude_keywords
+            exclude_keywords=exclude_keywords,
+            max_items=limit * 3
         )
 
-        items_found: List[Dict[str, Any]] = []
+        items_found: List[str] = []
         required_terms = [term.lower() for term in keyword.split()]
         unwanted_terms_from_input = [term.lower() for term in exclude_keywords.split()]
         all_unwanted_terms = list(set(unwanted_terms_from_input))
@@ -65,27 +66,14 @@ def search_mercari_items_filtered(
                     max_check_passed = (max_price is None) or (price <= max_price)
 
                     if min_check_passed and max_check_passed:
-                        full_info = None
-                        try:
-                            full_info = getItemInfo(item.id)
-                        except Exception:
-                            pass
+                        image_url = getattr(item, 'imageURL', 'N/A')
+                        item_url = getattr(item, 'productURL', 'N/A')
 
-                        item_dict = {
-                            "name": product_name,
-                            "url": getattr(item, 'productURL', 'N/A'),
-                            "price": price,
-                            "image_url": getattr(item, 'imageURL', 'N/A'),
-                        }
+                        parts = [f"### {product_name}"]
+                        parts.append(f"![{product_name}]({image_url})")
+                        parts.append(f"**Price:** ¥{price:,.0f} | [View on Mercari]({item_url})")
 
-                        if full_info is not None:
-                            if hasattr(full_info, 'item_condition') and full_info.item_condition is not None:
-                                item_dict["item_condition"] = full_info.item_condition.name
-                            if hasattr(full_info, 'seller') and full_info.seller is not None:
-                                item_dict["seller_name"] = full_info.seller.name
-                                item_dict["seller_reviews"] = full_info.seller.num_ratings
-
-                        items_found.append(item_dict)
+                        items_found.append("\n".join(parts))
 
                         if len(items_found) >= limit:
                             break
@@ -96,7 +84,10 @@ def search_mercari_items_filtered(
             except Exception as unexpected_err:
                 print(f"Warning: Skipping item due to unexpected error during filtering: {unexpected_err}")
                 continue
-        return items_found
+        if not items_found:
+            return "No items found matching your criteria."
+
+        return "\n\n---\n\n".join(items_found)
 
     except Exception as e:
         print(f"Error: An error occurred during Mercari search: {e}")

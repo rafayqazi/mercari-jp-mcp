@@ -132,15 +132,15 @@ def pageToPageToken(page):
 # returns an generator for Item objects
 # keeps searching until no results so may take a while to get results back
 
-def search(keywords, sort=MercariSort.SORT_CREATED_TIME, order=MercariOrder.ORDER_DESC, status=MercariSearchStatus.ON_SALE, exclude_keywords=""):
+def search(keywords, sort=MercariSort.SORT_CREATED_TIME, order=MercariOrder.ORDER_DESC, status=MercariSearchStatus.ON_SALE, exclude_keywords="", max_items=None):
 
     # This is per page and not for the final result
-    limit = 120
+    pageSize = 120
 
     data = {
         # this seems to be random, but we'll add a prefix for mercari to track if they wanted to
         "userId": "MERCARI_BOT_{}".format(uuid.uuid4()), 
-        "pageSize": limit,
+        "pageSize": pageSize,
         "pageToken": pageToPageToken(0),
         # same thing as userId, courtesy of a prefix for mercari
         "searchSessionId": "MERCARI_BOT_{}".format(uuid.uuid4()),
@@ -163,10 +163,16 @@ def search(keywords, sort=MercariSort.SORT_CREATED_TIME, order=MercariOrder.ORDE
     }
 
     has_next_page = True
+    yielded = 0
 
     while has_next_page:
         items, has_next_page, next_page_token = fetch(searchURL, data, parse)
-        yield from items
+        for item in items:
+            yield item
+            yielded += 1
+            if max_items is not None and yielded >= max_items:
+                has_next_page = False
+                break
         data['pageToken'] = next_page_token
 
 

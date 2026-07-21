@@ -4,8 +4,11 @@ import os
 import io
 import requests as http_requests
 import openpyxl
+from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'temp_download', 'mercari-2.2.1'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'temp_download'))
 from mercari import search, getItemInfo, MercariSort, MercariOrder, MercariSearchStatus
+from yahoo_auctions import search_yahoo, get_item_detail, parse_search_results, build_search_url
 
 app = Flask(__name__)
 
@@ -20,13 +23,13 @@ HTML_PAGE = u'''<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Mercari JP Search</title>
+<title>Mercari JP + Yahoo Auctions Search</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
   body { background: #f0f2f5; display: flex; justify-content: center; min-height: 100vh; }
   .container { max-width: 1000px; width: 100%; padding: 24px 16px; }
   h1 { font-size: 24px; color: #ea352d; margin-bottom: 20px; display: flex; align-items: center; gap: 8px; }
-  h1::before { content: "\\01F4F1"; font-size: 24px; }
+  h1::before { content: "\01F4F1"; font-size: 24px; }
   .card { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 16px; }
   .card h2 { font-size: 16px; color: #333; margin-bottom: 16px; }
   .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
@@ -45,6 +48,8 @@ HTML_PAGE = u'''<!DOCTYPE html>
   .results { display: grid; gap: 12px; }
   .result-card { display: flex; gap: 16px; padding: 16px; background: white; border: 1px solid #eee; border-radius: 10px; transition: box-shadow 0.2s; align-items: center; overflow: hidden; }
   .result-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.1); }
+  .result-thumb { width: 80px; height: 80px; border-radius: 8px; overflow: hidden; flex-shrink: 0; background: #f5f5f5; display: flex; align-items: center; justify-content: center; }
+  .result-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .result-icon { width: 48px; height: 48px; background: #f5f5f5; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 24px; flex-shrink: 0; }
   .result-info { flex: 1; min-width: 0; }
   .result-name { font-size: 14px; font-weight: 500; color: #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
@@ -107,6 +112,33 @@ HTML_PAGE = u'''<!DOCTYPE html>
   .bulk-result-body .result-card .result-name { font-size: 13px; }
   .dl-btn { padding: 8px 16px; background: #333; color: white; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; margin-top: 8px; }
   .dl-btn:hover { background: #555; }
+  .yahoo-result-card { display: flex; gap: 12px; padding: 12px; background: white; border: 1px solid #eee; border-radius: 10px; transition: box-shadow 0.2s; align-items: stretch; overflow: hidden; }
+  .yahoo-result-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.1); }
+  .yahoo-thumb { width: 90px; min-height: 90px; border-radius: 6px; overflow: hidden; flex-shrink: 0; background: #f5f5f5; }
+  .yahoo-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .yahoo-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .yahoo-title { font-size: 14px; font-weight: 500; color: #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .yahoo-price-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .yahoo-price { font-size: 18px; font-weight: 700; color: #222; }
+  .yahoo-price span { font-size: 11px; font-weight: 400; color: #999; }
+  .yahoo-buynow { font-size: 13px; color: #888; }
+  .yahoo-meta { display: flex; gap: 12px; font-size: 11px; color: #777; flex-wrap: wrap; }
+  .yahoo-meta span { display: inline-flex; align-items: center; gap: 3px; }
+  .yahoo-badge { display: inline-block; font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 3px; margin-right: 4px; }
+  .yahoo-badge.freeship { background: #e8f5e9; color: #2e7d32; }
+  .yahoo-badge.unused { background: #e3f2fd; color: #1565c0; }
+  .yahoo-badge.newitem { background: #fce4ec; color: #c62828; }
+  .yahoo-badge.sold { background: #ea352d; color: white; }
+  .yahoo-actions { display: flex; flex-direction: column; gap: 4px; flex-shrink: 0; justify-content: center; }
+  .yahoo-actions .result-link { text-align: center; }
+  .yahoo-thumb-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 28px; color: #ccc; }
+  .combined-grid { display: flex; gap: 16px; }
+  .combined-grid .combined-col { flex: 1; min-width: 0; width: 50%; }
+  .combined-grid .combined-col h3 { font-size: 14px; color: #333; margin-bottom: 12px; padding-bottom: 6px; border-bottom: 2px solid #eee; }
+  .combined-grid .combined-col h3.mercari-header { border-bottom-color: #ea352d; }
+  .combined-grid .combined-col h3.yahoo-header { border-bottom-color: #222; }
+  .combined-keyword-title { font-size: 13px; font-weight: 600; color: #555; margin: 12px 0 8px; padding: 6px 10px; background: #f5f5f5; border-radius: 6px; }
+  @media (max-width: 768px) { .combined-grid { flex-direction: column; } .combined-grid .combined-col { width: 100%; } }
   @media (max-width: 600px) { .form-row { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -116,7 +148,10 @@ HTML_PAGE = u'''<!DOCTYPE html>
   <div id="errorMsg" class="error-msg"></div>
   <div class="tabs">
     <button class="tab-btn active" onclick="switchTab('simple')">Simple Search</button>
-    <button class="tab-btn" onclick="switchTab('bulk')">Bulk Search</button>
+    <button class="tab-btn" onclick="switchTab('bulk')">Mercari Bulk Search</button>
+    <button class="tab-btn" onclick="switchTab('yahoo')">Yahoo Auctions</button>
+    <button class="tab-btn" onclick="switchTab('yahooBulk')">Yahoo Bulk</button>
+    <button class="tab-btn" onclick="switchTab('combinedBulk')">Mercari + Yahoo Bulk</button>
   </div>
   <div class="tab-content active" id="tabSimple">
   <div class="card">
@@ -182,7 +217,7 @@ HTML_PAGE = u'''<!DOCTYPE html>
 </div>
 <div class="tab-content" id="tabBulk">
   <div class="card">
-    <h2>Bulk Search</h2>
+    <h2>Mercari Bulk Search</h2>
     <div class="bulk-area">
       <div class="file-upload" id="fileUpload">
         <input type="file" accept=".txt,.csv,.xlsx" id="fileInput" onchange="handleFile(event)">
@@ -229,6 +264,216 @@ HTML_PAGE = u'''<!DOCTYPE html>
   </div>
   <div id="bulkResults"></div>
 </div>
+<div class="tab-content" id="tabYahoo">
+  <div class="card">
+    <div class="form-row">
+      <div class="form-group full">
+        <label for="yahooKeyword">Keyword *</label>
+        <input type="text" id="yahooKeyword" placeholder="e.g. iPhone 15 Pro 256GB">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label for="yahooMinPrice">Min Price (JPY)</label>
+        <input type="number" id="yahooMinPrice" placeholder="e.g. 10000">
+      </div>
+      <div class="form-group">
+        <label for="yahooMaxPrice">Max Price (JPY)</label>
+        <input type="number" id="yahooMaxPrice" placeholder="e.g. 200000">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label for="yahooStatus">Status</label>
+        <select id="yahooStatus">
+          <option value="live">Live Auctions</option>
+          <option value="sold">Sold / Ended</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="yahooSort">Sort By</label>
+        <select id="yahooSort">
+          <option value="new">Newly Listed</option>
+          <option value="end">Ending Soon</option>
+          <option value="price">Price: Low to High</option>
+          <option value="-price">Price: High to Low</option>
+          <option value="bid">Most Bids</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label for="yahooCondition">Condition</label>
+        <select id="yahooCondition">
+          <option value="">All</option>
+          <option value="1">Unused</option>
+          <option value="2">Used</option>
+          <option value="3">Near Unused</option>
+          <option value="4">No Scratches/Dirt</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="yahooBIN">BIN Filter</label>
+        <select id="yahooBIN">
+          <option value="all">All Items</option>
+          <option value="bin_only">BIN Only</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label for="yahooLimit">Max Results</label>
+        <input type="number" id="yahooLimit" value="20" min="1" max="100">
+      </div>
+      <div class="form-group"></div>
+    </div>
+    <button class="btn-search" id="yahooSearchBtn" onclick="doYahooSearch()">
+      <span class="spinner"></span>
+      <span class="btn-text">Search Yahoo Auctions</span>
+    </button>
+  </div>
+  <div id="yahooResultsContainer">
+    <div class="status" id="yahooInitialStatus">
+      <div class="emoji">&#x1F50D;</div>
+      <p>Enter a keyword and click Search</p>
+    </div>
+  </div>
+  <button class="dl-btn" id="yahooDlBtn" onclick="downloadYahooCSV()" style="display:none;margin-top:8px;">Download CSV</button>
+</div>
+<div class="tab-content" id="tabYahooBulk">
+  <div class="card">
+    <h2>Yahoo Auctions Bulk Search</h2>
+    <div class="bulk-area">
+      <div class="file-upload" id="yahooBulkFileUpload">
+        <input type="file" accept=".txt,.csv,.xlsx" id="yahooBulkFileInput" onchange="handleYahooBulkFile(event)">
+        <div class="file-label">Drop a <strong>.txt</strong>, <strong>.csv</strong>, or <strong>.xlsx</strong> file here or click to browse</div>
+      </div>
+      <div style="text-align:center;color:#999;font-size:12px;">&mdash; OR &mdash;</div>
+      <textarea id="yahooBulkKeywords" placeholder="Paste keywords here, one per line&#10;e.g.&#10;iPhone 15 Pro&#10;Canon PowerShot&#10;Roland SC-88"></textarea>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+        <div class="form-group" style="flex:1;min-width:100px;">
+          <label for="yahooBulkLimit">Per Keyword</label>
+          <select id="yahooBulkLimit"><option value="1">1</option><option value="2">2</option><option value="3" selected>3</option><option value="5">5</option><option value="10">10</option></select>
+        </div>
+        <div class="form-group" style="flex:1;min-width:100px;">
+          <label for="yahooBulkStatus">Status</label>
+          <select id="yahooBulkStatus"><option value="live">Live Auctions</option><option value="sold">Sold / Ended</option></select>
+        </div>
+        <div class="form-group" style="flex:1;min-width:100px;">
+          <label for="yahooBulkCondition">Condition</label>
+          <select id="yahooBulkCondition">
+            <option value="">All</option>
+            <option value="1">Unused</option>
+            <option value="2">Used</option>
+            <option value="3">Near Unused</option>
+            <option value="4">No Scratches/Dirt</option>
+          </select>
+        </div>
+        <div class="form-group" style="flex:1;min-width:100px;">
+          <label for="yahooBulkSort">Sort By</label>
+          <select id="yahooBulkSort">
+            <option value="new">Newly Listed</option>
+            <option value="end">Ending Soon</option>
+            <option value="price">Price: Low to High</option>
+            <option value="-price">Price: High to Low</option>
+            <option value="bid">Most Bids</option>
+          </select>
+        </div>
+        <div class="form-group" style="flex:1;min-width:100px;">
+          <label for="yahooBulkBIN">BIN Filter</label>
+          <select id="yahooBulkBIN">
+            <option value="all">All Items</option>
+            <option value="bin_only">BIN Only</option>
+          </select>
+        </div>
+      </div>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+        <div class="form-group" style="flex:1;min-width:100px;">
+          <label for="yahooBulkMinPrice">Min Price (JPY)</label>
+          <input type="number" id="yahooBulkMinPrice" placeholder="e.g. 10000">
+        </div>
+        <div class="form-group" style="flex:1;min-width:100px;">
+          <label for="yahooBulkMaxPrice">Max Price (JPY)</label>
+          <input type="number" id="yahooBulkMaxPrice" placeholder="e.g. 200000">
+        </div>
+        <button class="btn-search" id="yahooBulkBtn" onclick="doYahooBulkSearch()" style="flex:1;min-width:150px;margin-top:18px;">
+          <span class="spinner"></span>
+          <span class="btn-text">Search Yahoo Bulk</span>
+        </button>
+      </div>
+      <div class="bulk-keyword-count" id="yahooBulkCount"></div>
+    </div>
+  </div>
+  <div id="yahooBulkResults"></div>
+</div>
+<div class="tab-content" id="tabCombinedBulk">
+  <div class="card">
+    <h2>Mercari + Yahoo Bulk Search</h2>
+    <div class="bulk-area">
+      <div class="file-upload" id="combinedFileUpload">
+        <input type="file" accept=".txt,.csv,.xlsx" id="combinedFileInput" onchange="handleCombinedFile(event)">
+        <div class="file-label">Drop a <strong>.txt</strong>, <strong>.csv</strong>, or <strong>.xlsx</strong> file here or click to browse</div>
+      </div>
+      <div style="text-align:center;color:#999;font-size:12px;">&mdash; OR &mdash;</div>
+      <textarea id="combinedKeywords" placeholder="Paste keywords here, one per line&#10;e.g.&#10;iPhone 15 Pro&#10;Canon PowerShot&#10;Roland SC-88"></textarea>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+        <div class="form-group" style="flex:1;min-width:100px;">
+          <label for="combinedLimit">Per Keyword</label>
+          <select id="combinedLimit"><option value="1">1</option><option value="2">2</option><option value="3" selected>3</option><option value="5">5</option></select>
+        </div>
+        <div class="form-group" style="flex:1;min-width:120px;">
+          <label for="combinedStatus">Mercari Status</label>
+          <select id="combinedStatus"><option value="all">All</option><option value="available">Available</option><option value="sold">Sold Out</option></select>
+        </div>
+        <div class="form-group" style="flex:1;min-width:120px;">
+          <label for="combinedCondition">Mercari Condition</label>
+          <select id="combinedCondition">
+            <option value="">All</option>
+            <option value="新品、未使用">New / Unused</option>
+            <option value="未使用に近い">Like New</option>
+            <option value="目立った傷や汚れなし">Excellent (No Scratches)</option>
+            <option value="やや傷や汚れあり">Good (Slight Scratches)</option>
+            <option value="傷や汚れあり">Fair (Scratches/Dirt)</option>
+            <option value="全体的に状態が悪い">Poor</option>
+          </select>
+        </div>
+        <div class="form-group" style="flex:1;min-width:100px;">
+          <label for="combinedMinReviews">Min Reviews</label>
+          <input type="number" id="combinedMinReviews" placeholder="e.g. 50" min="0">
+        </div>
+        <div class="form-group" style="flex:1;min-width:100px;">
+          <label for="combinedYahooStatus">Yahoo Status</label>
+          <select id="combinedYahooStatus"><option value="live">Live Auctions</option><option value="sold">Sold / Ended</option></select>
+        </div>
+        <div class="form-group" style="flex:1;min-width:100px;">
+          <label for="combinedYahooCondition">Yahoo Condition</label>
+          <select id="combinedYahooCondition">
+            <option value="">All</option>
+            <option value="1">Unused</option>
+            <option value="2">Used</option>
+            <option value="3">Near Unused</option>
+            <option value="4">No Scratches/Dirt</option>
+          </select>
+        </div>
+        <div class="form-group" style="flex:1;min-width:100px;">
+          <label for="combinedYahooBIN">BIN Filter</label>
+          <select id="combinedYahooBIN">
+            <option value="all">All Items</option>
+            <option value="bin_only">BIN Only</option>
+          </select>
+        </div>
+        <button class="btn-search" id="combinedBtn" onclick="doCombinedBulkSearch()" style="flex:1;min-width:150px;margin-top:18px;">
+          <span class="spinner"></span>
+          <span class="btn-text">Search Both</span>
+        </button>
+      </div>
+      <div class="bulk-keyword-count" id="combinedCount"></div>
+    </div>
+  </div>
+  <div id="combinedResults">
+    <div class="status"><div class="emoji">&#x1F50D;</div><p>Enter keywords and click Search Both</p></div>
+  </div>
+</div>
 <div class="modal-overlay" id="modalOverlay" onclick="closeModal(event)">
   <div class="modal" id="modalContent" onclick="event.stopPropagation()">
     <button class="modal-close" onclick="closeModal()">&times;</button>
@@ -274,8 +519,8 @@ function renderResults(items, keyword) {
   let html = '<div class="count-badge">Found <strong>'+items.length+'</strong> item'+(items.length>1?'s':'')+'</div><div class="results">';
   for (const item of items) {
     html += '<div class="result-card">'
-      + '<div class="result-icon">&#x1F4E6;</div>'
-      + '<div class="result-info"><div class="result-name">'+(item.name_en ? escapeHtml(item.name_en) : escapeHtml(item.name))+'</div>'
+      + ''+(item.image ? '<div class="result-thumb"><img src="'+escapeHtml(item.image)+'" alt="" loading="lazy" onerror="handleImageError(this)"></div>' : '<div class="result-icon">&#x1F4E6;</div>')
+      +'<div class="result-info"><div class="result-name">'+(item.name_en ? escapeHtml(item.name_en) : escapeHtml(item.name))+'</div>'
       + '<div class="result-price">&yen;'+Number(item.price).toLocaleString()+' <span>JPY</span></div>'
         + (item.updated ? '<div class="result-updated">Updated: '+timeAgo(item.updated)+'</div>' : '')
         + (item.condition_en ? '<div class="result-condition">'+escapeHtml(item.condition_en)+'</div>' : '')
@@ -293,6 +538,22 @@ function renderResults(items, keyword) {
   html += '</div>';
   container.innerHTML = html;
 }
+
+function toggleBulkGroup(el) {
+  const body = el.nextElementSibling;
+  if (body) {
+    body.style.display = body.style.display === 'none' ? 'block' : 'none';
+  }
+}
+
+
+function handleImageError(img) {
+  if (img && img.parentElement) {
+    img.parentElement.className = 'result-icon';
+    img.parentElement.innerHTML = '&#x1F4E6;';
+  }
+}
+
 function closeModal(e) {
   if (e && e.target !== e.currentTarget) return;
   document.getElementById('modalOverlay').classList.remove('active');
@@ -397,23 +658,23 @@ async function doBulkSearch() {
 }
 function renderBulkResults(results) {
   const container = document.getElementById('bulkResults');
-  const keys = Object.keys(results);
-  if (!keys.length) {
+  if (!results || !results.length) {
     container.innerHTML = '<div class="status"><div class="emoji">&#x1F622;</div><p>No results found</p></div>';
     return;
   }
-  let html = '<div class="count-badge">Results for <strong>'+keys.length+'</strong> keyword(s)</div>';
+  let html = '<div class="count-badge">Results for <strong>'+results.length+'</strong> keyword(s)</div>';
   html += '<button class="dl-btn" onclick="downloadCSV()">Download CSV</button>';
   let csvData = [];
-  for (const kw of keys) {
-    const items = results[kw] || [];
-    html += '<div class="bulk-result-group"><div class="bulk-result-header" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\\'none\\'?\\'block\\':\\'none\\'">'
+  for (const group of results) {
+    const kw = group.keyword;
+    const items = group.items || [];
+    html += '<div class="bulk-result-group"><div class="bulk-result-header" onclick="toggleBulkGroup(this)"'
       + escapeHtml(kw) + ' <span class="count">'+items.length+' item(s)</span></div>'
       + '<div class="bulk-result-body"><div class="results">';
     for (const item of items) {
       const name = item.name_en || item.name;
       html += '<div class="result-card">'
-        + '<div class="result-icon">&#x1F4E6;</div>'
+        + (item.image ? '<div class="result-thumb"><img src="'+escapeHtml(item.image)+'" alt="" loading="lazy" onerror="handleImageError(this)"></div>' : '<div class="result-icon">&#x1F4E6;</div>')
         + '<div class="result-info"><div class="result-name">'+escapeHtml(name)+'</div>'
         + '<div class="result-price">&yen;'+Number(item.price).toLocaleString()+' <span>JPY</span></div>'
       + (item.updated ? '<div class="result-updated">Updated: '+timeAgo(item.updated)+'</div>' : '')
@@ -423,7 +684,7 @@ function renderBulkResults(results) {
         + (item.auction ? '<div class="result-tag auction">AUCTION</div>' : '')
         + '</div>'
         + '<div class="result-actions">'
-        + '<button class="result-link desc-btn" onclick="fetchDescription(\\''+escapeHtml(item.id)+'\\', this)">Desc</button>'
+        + '<button class="result-link desc-btn" onclick="fetchDescription(\'+escapeHtml(item.id)+'\\', this)">Desc</button>'
         + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View</a>'
         + '</div></div>';
       csvData.push({keyword: kw, name: name, price: item.price, url: item.url, status: item.status, condition_en: item.condition_en, seller_name: item.seller_name, seller_reviews: item.seller_reviews, updated: item.updated});
@@ -434,6 +695,7 @@ function renderBulkResults(results) {
   html += '<button class="dl-btn" onclick="downloadCSV()" style="margin-top:12px;">Download CSV</button>';
   container.innerHTML = html;
 }
+
 function downloadCSV() {
   const data = window._bulkCSV || [];
   if (!data.length) return;
@@ -443,6 +705,400 @@ function downloadCSV() {
   }
   const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'mercari_bulk_results.csv'; a.click();
+}
+
+// Yahoo Auctions
+document.getElementById('yahooKeyword').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') doYahooSearch();
+});
+
+let _yahooItems = [];
+
+async function doYahooSearch() {
+  const btn = document.getElementById('yahooSearchBtn');
+  const errDiv = document.getElementById('errorMsg');
+  errDiv.style.display = 'none';
+  const keyword = document.getElementById('yahooKeyword').value.trim();
+  if (!keyword) { showError('Please enter a keyword'); return; }
+  btn.classList.add('loading'); btn.disabled = true;
+  try {
+    const params = new URLSearchParams({
+      keyword: keyword,
+      min_price: document.getElementById('yahooMinPrice').value || '',
+      max_price: document.getElementById('yahooMaxPrice').value || '',
+      status: document.getElementById('yahooStatus').value,
+      sort: document.getElementById('yahooSort').value,
+      condition: document.getElementById('yahooCondition').value,
+      bin_filter: document.getElementById('yahooBIN').value,
+      limit: document.getElementById('yahooLimit').value || '20',
+      page: '1'
+    });
+    const resp = await fetch('/api/yahoo-search?'+params.toString());
+    if (!resp.ok) { const e = await resp.json(); throw new Error(e.error || 'Search failed'); }
+    const data = await resp.json();
+    renderYahooResults(data.items, keyword);
+    _yahooItems = data.items || [];
+    document.getElementById('yahooDlBtn').style.display = data.items && data.items.length ? 'inline-block' : 'none';
+  } catch (e) { showError(e.message); }
+  finally { btn.classList.remove('loading'); btn.disabled = false; }
+}
+
+function renderYahooResults(items, keyword) {
+  const container = document.getElementById('yahooResultsContainer');
+  if (!items || !items.length) {
+    container.innerHTML = '<div class="status"><div class="emoji">&#x1F622;</div><p>No results found for "'+escapeHtml(keyword)+'"</p></div>';
+    return;
+  }
+  let html = '<div class="count-badge">Found <strong>'+items.length+'</strong> item'+(items.length>1?'s':'')+'</div><div class="results">';
+  for (const item of items) {
+    const badges = [];
+    if (item.status === 'sold') badges.push('<span class="yahoo-badge sold">SOLD</span>');
+    if (item.free_shipping) badges.push('<span class="yahoo-badge freeship">FREE SHIP</span>');
+    if (item.unused) badges.push('<span class="yahoo-badge unused">UNUSED</span>');
+    if (item.is_new) badges.push('<span class="yahoo-badge newitem">NEW</span>');
+
+    html += '<div class="yahoo-result-card">'
+      + '<div class="yahoo-thumb">'
+      + (item.thumbnail ? '<img src="'+escapeHtml(item.thumbnail)+'" alt="" loading="lazy" onerror="handleImageError(this)">' : '<div class="yahoo-thumb-placeholder">&#x1F4E6;</div>')
+      + '</div>'
+      + '<div class="yahoo-info">'
+      + '<div class="yahoo-title">'+escapeHtml(item.title)+'</div>'
+      + '<div class="yahoo-price-row">'
+      + '<div class="yahoo-price">&yen;'+Number(item.price).toLocaleString()+' <span>JPY</span></div>'
+      + (item.buy_now_price ? '<div class="yahoo-buynow">BIN &yen;'+Number(item.buy_now_price).toLocaleString()+'</div>' : '')
+      + '</div>'
+      + '<div class="yahoo-meta">'
+      + '<span>&#x1F3F7; '+item.bid_count+' bid'+(item.bid_count!==1?'s':'')+'</span>'
+      + (item.time_remaining ? '<span>&#x23F3; '+escapeHtml(item.time_remaining)+'</span>' : '')
+      + (item.seller_name ? '<span>&#x1F464; '+escapeHtml(item.seller_name)+'</span>' : '<span>&#x1F464; '+escapeHtml(item.seller_id||'Unknown')+'</span>')
+      + '</div>'
+      + '<div>'+badges.join(' ')+'</div>'
+      + '</div>'
+      + '<div class="yahoo-actions">'
+      + '<button class="result-link desc-btn" onclick="fetchYahooDescription(\'+escapeHtml(item.id)+'\\', this)">Detail</button>'
+      + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View &rarr;</a>'
+      + '</div>'
+      + '</div>';
+  }
+  html += '</div>';
+  container.innerHTML = html;
+}
+
+async function fetchYahooDescription(itemId, btn) {
+  const overlay = document.getElementById('modalOverlay');
+  const body = document.getElementById('modalBody');
+  body.innerHTML = '<div class="modal-loading">Loading item detail...</div>';
+  overlay.classList.add('active');
+  try {
+    const resp = await fetch('/api/yahoo-item/'+encodeURIComponent(itemId));
+    if (!resp.ok) throw new Error('Failed to fetch');
+    const data = await resp.json();
+    const displayDesc = data.description || 'No description available';
+    const priceStr = data.price ? '&yen;'+Number(data.price).toLocaleString() : 'N/A';
+    const bnStr = data.buy_now_price ? ' (BIN &yen;'+Number(data.buy_now_price).toLocaleString()+')' : '';
+    body.innerHTML = '<h3>'+escapeHtml(data.title || data.id)+'</h3>'
+      + '<div class="modal-meta">'
+      + 'Price: '+priceStr+bnStr
+      + (data.condition ? ' &middot; Condition: '+escapeHtml(data.condition) : '')
+      + (data.seller_name ? ' &middot; Seller: '+escapeHtml(data.seller_name) : '')
+      + (data.bid_count ? ' &middot; Bids: '+data.bid_count : '')
+      + (data.end_time ? ' &middot; Ends: '+escapeHtml(data.end_time) : '')
+      + '</div>'
+      + '<div class="modal-desc">'+escapeHtml(displayDesc)+'</div>';
+  } catch(e) {
+    body.innerHTML = '<div class="modal-loading" style="color:#d42c25;">Error: '+e.message+'</div>';
+  }
+}
+
+function downloadYahooCSV() {
+  const data = _yahooItems;
+  if (!data.length) return;
+  let csv = '\\uFEFFTitle,Price JPY,BuyNow JPY,Bids,Time Remaining,Seller,Status,Free Shipping,URL\\n';
+  for (const r of data) {
+    csv += '"'+(r.title||'').replace(/"/g,'""')+'",'+r.price+','+(r.buy_now_price||'')+','+r.bid_count+',"'+escapeHtml(r.time_remaining)+'","'+(r.seller_name||r.seller_id||'')+'","'+r.status+'","'+(r.free_shipping?'Yes':'No')+'","'+r.url+'"\\n';
+  }
+  const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'yahoo_auctions_results.csv'; a.click();
+}
+
+// Yahoo Bulk Search
+document.getElementById('yahooBulkKeywords').addEventListener('input', updateYahooBulkCount);
+
+function updateYahooBulkCount() {
+  const v = document.getElementById('yahooBulkKeywords').value.trim();
+  const n = v ? v.split('\\n').filter(l => l.trim()).length : 0;
+  document.getElementById('yahooBulkCount').textContent = n ? n+' keyword(s) loaded' : '';
+}
+
+async function handleYahooBulkFile(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (ext === 'txt' || ext === 'csv') {
+    const text = await file.text();
+    document.getElementById('yahooBulkKeywords').value = text;
+  } else {
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      const resp = await fetch('/api/upload-keywords', { method: 'POST', body: formData });
+      if (!resp.ok) throw new Error('Upload failed');
+      const data = await resp.json();
+      if (data.keywords) document.getElementById('yahooBulkKeywords').value = data.keywords.join('\\n');
+    } catch(e) { showError(e.message); }
+  }
+  updateYahooBulkCount();
+}
+
+async function doYahooBulkSearch() {
+  const btn = document.getElementById('yahooBulkBtn');
+  const errDiv = document.getElementById('errorMsg');
+  errDiv.style.display = 'none';
+  const text = document.getElementById('yahooBulkKeywords').value.trim();
+  if (!text) { showError('Enter keywords or upload a file'); return; }
+  const keywords = text.split('\\n').map(l => l.trim()).filter(l => l);
+  if (!keywords.length) { showError('No valid keywords found'); return; }
+  if (keywords.length > 100) { showError('Maximum 100 keywords allowed'); return; }
+  btn.classList.add('loading'); btn.disabled = true;
+  try {
+    const resp = await fetch('/api/yahoo-bulk-search', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        keywords: keywords,
+        per_keyword: parseInt(document.getElementById('yahooBulkLimit').value) || 3,
+        status: document.getElementById('yahooBulkStatus').value,
+        condition: document.getElementById('yahooBulkCondition').value,
+        sort: document.getElementById('yahooBulkSort').value,
+        bin_filter: document.getElementById('yahooBulkBIN').value,
+        min_price: document.getElementById('yahooBulkMinPrice').value || '',
+        max_price: document.getElementById('yahooBulkMaxPrice').value || ''
+      })
+    });
+    if (!resp.ok) { const e = await resp.json(); throw new Error(e.error || 'Search failed'); }
+    const data = await resp.json();
+    renderYahooBulkResults(data.results);
+  } catch(e) { showError(e.message); }
+  finally { btn.classList.remove('loading'); btn.disabled = false; }
+}
+
+function renderYahooBulkResults(results) {
+  const container = document.getElementById('yahooBulkResults');
+  if (!results || !results.length) {
+    container.innerHTML = '<div class="status"><div class="emoji">&#x1F622;</div><p>No results found</p></div>';
+    return;
+  }
+  let html = '<div class="count-badge">Results for <strong>'+results.length+'</strong> keyword(s)</div>';
+  let csvData = [];
+  for (const group of results) {
+    const kw = group.keyword;
+    const items = group.items || [];
+    html += '<div class="bulk-result-group"><div class="bulk-result-header" onclick="toggleBulkGroup(this)"'
+      + escapeHtml(kw) + ' <span class="count">'+items.length+' item(s)</span></div>'
+      + '<div class="bulk-result-body"><div class="results">';
+    for (const item of items) {
+      const badges = [];
+      if (item.status === 'sold') badges.push('<span class="yahoo-badge sold">SOLD</span>');
+      if (item.free_shipping) badges.push('<span class="yahoo-badge freeship">FREE SHIP</span>');
+      if (item.unused) badges.push('<span class="yahoo-badge unused">UNUSED</span>');
+      if (item.is_new) badges.push('<span class="yahoo-badge newitem">NEW</span>');
+
+      html += '<div class="yahoo-result-card">'
+        + '<div class="yahoo-thumb">'
+        + (item.thumbnail ? '<img src="'+escapeHtml(item.thumbnail)+'" alt="" loading="lazy" onerror="handleImageError(this)">' : '<div class="yahoo-thumb-placeholder">&#x1F4E6;</div>')
+        + '</div>'
+        + '<div class="yahoo-info">'
+        + '<div class="yahoo-title">'+escapeHtml(item.title)+'</div>'
+        + '<div class="yahoo-price-row">'
+        + '<div class="yahoo-price">&yen;'+Number(item.price).toLocaleString()+' <span>JPY</span></div>'
+        + (item.buy_now_price ? '<div class="yahoo-buynow">BIN &yen;'+Number(item.buy_now_price).toLocaleString()+'</div>' : '')
+        + '</div>'
+        + '<div class="yahoo-meta">'
+        + '<span>&#x1F3F7; '+item.bid_count+' bid'+(item.bid_count!==1?'s':'')+'</span>'
+        + (item.time_remaining ? '<span>&#x23F3; '+escapeHtml(item.time_remaining)+'</span>' : '')
+        + '<span>&#x1F464; '+escapeHtml(item.seller_name || item.seller_id || 'Unknown')+'</span>'
+        + '</div>'
+        + '<div>'+badges.join(' ')+'</div>'
+        + '</div>'
+        + '<div class="yahoo-actions">'
+        + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View &rarr;</a>'
+        + '</div>'
+        + '</div>';
+      csvData.push({keyword: kw, title: item.title, price: item.price, buy_now_price: item.buy_now_price, bid_count: item.bid_count, time_remaining: item.time_remaining, seller: item.seller_name || item.seller_id, status: item.status, free_shipping: item.free_shipping, url: item.url});
+    }
+    html += '</div></div></div>';
+  }
+  window._yahooBulkCSV = csvData;
+  html += '<button class="dl-btn" onclick="downloadYahooBulkCSV()" style="margin-top:12px;">Download CSV</button>';
+  container.innerHTML = html;
+}
+
+function downloadYahooBulkCSV() {
+  const data = window._yahooBulkCSV || [];
+  if (!data.length) return;
+  let csv = '\\uFEFFKeyword,Title,Price JPY,BuyNow JPY,Bids,Time Remaining,Seller,Status,Free Shipping,URL\\n';
+  for (const r of data) {
+    csv += '"'+r.keyword+'","'+(r.title||'').replace(/"/g,'""')+'",'+r.price+','+(r.buy_now_price||'')+','+r.bid_count+',"'+escapeHtml(r.time_remaining)+'","'+(r.seller||'')+'","'+r.status+'","'+(r.free_shipping?'Yes':'No')+'","'+r.url+'"\\n';
+  }
+  const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'yahoo_bulk_results.csv'; a.click();
+}
+
+// Combined Mercari + Yahoo Bulk Search
+document.getElementById('combinedKeywords').addEventListener('input', updateCombinedCount);
+
+function updateCombinedCount() {
+  const v = document.getElementById('combinedKeywords').value.trim();
+  const n = v ? v.split('\\n').filter(l => l.trim()).length : 0;
+  document.getElementById('combinedCount').textContent = n ? n+' keyword(s) loaded' : '';
+}
+
+async function handleCombinedFile(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (ext === 'txt' || ext === 'csv') {
+    const text = await file.text();
+    document.getElementById('combinedKeywords').value = text;
+  } else {
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      const resp = await fetch('/api/upload-keywords', { method: 'POST', body: formData });
+      if (!resp.ok) throw new Error('Upload failed');
+      const data = await resp.json();
+      if (data.keywords) document.getElementById('combinedKeywords').value = data.keywords.join('\\n');
+    } catch(e) { showError(e.message); }
+  }
+  updateCombinedCount();
+}
+
+async function doCombinedBulkSearch() {
+  const btn = document.getElementById('combinedBtn');
+  const errDiv = document.getElementById('errorMsg');
+  errDiv.style.display = 'none';
+  const text = document.getElementById('combinedKeywords').value.trim();
+  if (!text) { showError('Enter keywords or upload a file'); return; }
+  const keywords = text.split('\\n').map(l => l.trim()).filter(l => l);
+  if (!keywords.length) { showError('No valid keywords found'); return; }
+  if (keywords.length > 50) { showError('Maximum 50 keywords allowed'); return; }
+  btn.classList.add('loading'); btn.disabled = true;
+  try {
+    const resp = await fetch('/api/combined-bulk-search', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        keywords: keywords,
+        per_keyword: parseInt(document.getElementById('combinedLimit').value) || 3,
+        mercari_status: document.getElementById('combinedStatus').value,
+        mercari_condition: document.getElementById('combinedCondition').value,
+        mercari_min_reviews: parseInt(document.getElementById('combinedMinReviews').value) || 0,
+        yahoo_status: document.getElementById('combinedYahooStatus').value,
+        yahoo_condition: document.getElementById('combinedYahooCondition').value,
+        yahoo_bin_filter: document.getElementById('combinedYahooBIN').value
+      })
+    });
+    if (!resp.ok) { const e = await resp.json(); throw new Error(e.error || 'Search failed'); }
+    const data = await resp.json();
+    renderCombinedResults(data);
+  } catch(e) { showError(e.message); }
+  finally { btn.classList.remove('loading'); btn.disabled = false; }
+}
+
+function renderCombinedResults(data) {
+  const container = document.getElementById('combinedResults');
+  if (!data.mercari_results && !data.yahoo_results) {
+    container.innerHTML = '<div class="status"><div class="emoji">&#x1F622;</div><p>No results found</p></div>';
+    return;
+  }
+  const mercariMap = {};
+  const yahooMap = {};
+  const allKeywords = data.keywords || [];
+
+  if (data.mercari_results) {
+    for (const g of data.mercari_results) {
+      mercariMap[g.keyword] = g.items || [];
+    }
+  }
+  if (data.yahoo_results) {
+    for (const g of data.yahoo_results) {
+      yahooMap[g.keyword] = g.items || [];
+    }
+  }
+
+  if (!allKeywords.length) {
+    container.innerHTML = '<div class="status"><div class="emoji">&#x1F622;</div><p>No results found</p></div>';
+    return;
+  }
+
+  let html = '<div class="count-badge">Results for <strong>'+allKeywords.length+'</strong> keyword(s)</div>';
+  for (const kw of allKeywords) {
+    const mercariItems = mercariMap[kw] || [];
+    const yahooItems = yahooMap[kw] || [];
+    if (!mercariItems.length && !yahooItems.length) continue;
+
+    html += '<div class="bulk-result-group">'
+      + '<div class="bulk-result-header" onclick="toggleBulkGroup(this)"'
+      + escapeHtml(kw) + ' <span class="count">Mercari: '+mercariItems.length+' &middot; Yahoo: '+yahooItems.length+'</span></div>'
+      + '<div class="bulk-result-body"><div class="combined-grid">'
+      + '<div class="combined-col"><h3 class="mercari-header">&#x1F4E6; Mercari</h3>';
+
+    if (mercariItems.length) {
+      for (const item of mercariItems) {
+        const name = item.name_en || item.name;
+        html += '<div class="result-card" style="margin-bottom:8px;">'
+          + (item.image ? '<div class="result-thumb"><img src="'+escapeHtml(item.image)+'" alt="" loading="lazy" onerror="handleImageError(this)"></div>' : '<div class="result-icon">&#x1F4E6;</div>')
+          + '<div class="result-info"><div class="result-name">'+escapeHtml(name)+'</div>'
+          + '<div class="result-price">&yen;'+Number(item.price).toLocaleString()+' <span>JPY</span></div>'
+          + (item.condition_en ? '<div class="result-condition">'+escapeHtml(item.condition_en)+'</div>' : '')
+          + (item.seller_name ? '<div class="result-seller">'+escapeHtml(item.seller_name)+' ('+item.seller_reviews+' reviews)</div>' : '')
+          + (item.status === 'ITEM_STATUS_SOLD_OUT' ? '<div class="result-tag sold">SOLD OUT</div>' : '')
+          + '</div>'
+          + '<div class="result-actions">'
+          + '<button class="result-link desc-btn" onclick="fetchDescription(\\''+escapeHtml(item.id)+'\\', this)">Description</button>'
+          + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View</a>'
+          + '</div></div>';
+      }
+    } else {
+      html += '<div class="status" style="padding:16px;font-size:12px;">&#x1F622; No Mercari results</div>';
+    }
+
+    html += '</div><div class="combined-col"><h3 class="yahoo-header">&#x1F4E6; Yahoo Auctions</h3>';
+
+    if (yahooItems.length) {
+      for (const item of yahooItems) {
+        const badges = [];
+        if (item.status === 'sold') badges.push('<span class="yahoo-badge sold">SOLD</span>');
+        if (item.free_shipping) badges.push('<span class="yahoo-badge freeship">FREE SHIP</span>');
+
+        html += '<div class="yahoo-result-card" style="margin-bottom:8px;">'
+          + '<div class="yahoo-thumb" style="width:60px;min-height:60px;">'
+          + (item.thumbnail ? '<img src="'+escapeHtml(item.thumbnail)+'" alt="" loading="lazy" onerror="handleImageError(this)">' : '<div class="yahoo-thumb-placeholder">&#x1F4E6;</div>')
+          + '</div>'
+          + '<div class="yahoo-info">'
+          + '<div class="yahoo-title">'+escapeHtml(item.title)+'</div>'
+          + '<div class="yahoo-price-row">'
+          + '<div class="yahoo-price">&yen;'+Number(item.price).toLocaleString()+' <span>JPY</span></div>'
+          + (item.buy_now_price ? '<div class="yahoo-buynow">BIN &yen;'+Number(item.buy_now_price).toLocaleString()+'</div>' : '')
+          + '</div>'
+          + '<div class="yahoo-meta">'
+          + '<span>'+item.bid_count+' bid'+(item.bid_count!==1?'s':'')+'</span>'
+          + (item.time_remaining ? '<span>'+escapeHtml(item.time_remaining)+'</span>' : '')
+          + '</div>'
+          + '<div>'+badges.join(' ')+'</div>'
+          + '</div>'
+          + '<div class="yahoo-actions">'
+          + '<button class="result-link desc-btn" onclick="fetchYahooDescription(\\''+escapeHtml(item.id)+'\\', this)">Detail</button>'
+          + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View</a>'
+          + '</div></div>';
+      }
+    } else {
+      html += '<div class="status" style="padding:16px;font-size:12px;">&#x1F622; No Yahoo results</div>';
+    }
+
+    html += '</div></div></div></div>';
+  }
+  container.innerHTML = html;
 }
 </script>
 </body>
@@ -486,7 +1142,8 @@ def api_search():
             sort=MercariSort.SORT_SCORE,
             order=MercariOrder.ORDER_DESC,
             status=MercariSearchStatus.DEFAULT,
-            exclude_keywords=exclude_keywords
+            exclude_keywords=exclude_keywords,
+            max_items=limit * 3
         )
         
         COND_IDS = {'1': '新品、未使用', '2': '未使用に近い', '3': '目立った傷や汚れなし', '4': 'やや傷や汚れあり', '5': '傷や汚れあり', '6': '全体的に状態が悪い'}
@@ -540,26 +1197,11 @@ def api_search():
                     continue
                 
                 updated_ts = getattr(item, 'updated', 0)
+                image_url = getattr(item, 'imageURL', '') or (item.thumbnails[0] if getattr(item, 'thumbnails', None) else '')
 
                 # Detect shop item from search result (no extra API call)
                 if getattr(item, 'isShopItem', False):
                     url = 'https://jp.mercari.com/shops/product/' + item_id
-
-                full_info = None
-                seller_name = ''
-                seller_reviews = 0
-                try:
-                    full_info = getItemInfo(item_id)
-                    if full_info is not None:
-                        if hasattr(full_info, 'seller') and full_info.seller is not None:
-                            seller_name = full_info.seller.name or ''
-                            seller_reviews = full_info.seller.num_ratings or 0
-                        if hasattr(full_info, 'item_condition') and full_info.item_condition is not None:
-                            cond_name = full_info.item_condition.name or cond_name
-                        if hasattr(full_info, 'is_shop_item') and str(full_info.is_shop_item).lower() in ('true', '1'):
-                            url = 'https://jp.mercari.com/shops/product/' + item_id
-                except Exception:
-                    pass
 
                 items.append({
                     'id': item_id,
@@ -571,8 +1213,9 @@ def api_search():
                     'condition': cond_name,
                     'condition_en': COND_EN.get(cond_name, cond_name),
                     'updated': updated_ts,
-                    'seller_name': seller_name,
-                    'seller_reviews': seller_reviews
+                    'seller_name': '',
+                    'seller_reviews': 0,
+                    'image': image_url
                 })
                 
                 if len(items) >= limit:
@@ -707,14 +1350,11 @@ def api_bulk_search():
             '傷や汚れあり': 'SCRATCHES OR DIRT',
             '全体的に状態が悪い': 'POOR CONDITION'
         }
-        
-        results = {}
-        for kw in keywords[:100]:
-            kw = kw.strip()
-            if not kw:
-                continue
+
+        def search_keyword(kw):
             try:
-                search_results = search(kw, sort=MercariSort.SORT_SCORE, order=MercariOrder.ORDER_DESC, status=MercariSearchStatus.ON_SALE)
+                needs_review_filter = min_reviews is not None or max_reviews is not None
+                search_results = search(kw, sort=MercariSort.SORT_SCORE, order=MercariOrder.ORDER_DESC, status=MercariSearchStatus.ON_SALE, max_items=per_keyword * 3)
                 items = []
                 for item in search_results:
                     name = getattr(item, 'productName', None)
@@ -730,61 +1370,396 @@ def api_bulk_search():
                     cond_name = COND_IDS.get(cond_id, '')
                     if condition_filter and cond_name != condition_filter:
                         continue
-                    updated_ts = getattr(item, 'updated', 0)
                     item_id = getattr(item, 'id', '')
-                    full_info = None
-                    seller_name = ''
-                    seller_reviews = 0
                     item_url = getattr(item, 'productURL', '')
-                    # Detect shop item from search result (no extra API call)
+                    image_url = getattr(item, 'imageURL', '') or (item.thumbnails[0] if getattr(item, 'thumbnails', None) else '')
                     if getattr(item, 'isShopItem', False):
                         item_url = 'https://jp.mercari.com/shops/product/' + item_id
-                    try:
-                        full_info = getItemInfo(item_id)
-                        if full_info is not None:
-                            if hasattr(full_info, 'seller') and full_info.seller is not None:
-                                seller_name = full_info.seller.name or ''
-                                seller_reviews = full_info.seller.num_ratings or 0
-                            if hasattr(full_info, 'item_condition') and full_info.item_condition is not None:
-                                cond_name = full_info.item_condition.name or cond_name
-                            if hasattr(full_info, 'is_shop_item') and str(full_info.is_shop_item).lower() in ('true', '1'):
-                                item_url = 'https://jp.mercari.com/shops/product/' + item_id
-                    except Exception:
-                        pass
-                    if min_reviews is not None and seller_reviews < min_reviews:
-                        continue
-                    if max_reviews is not None and seller_reviews > max_reviews:
-                        continue
                     items.append({
                         'id': item_id,
                         'name': name,
                         'price': float(price),
+                        'image': image_url,
+                        'url': item_url,
+                        'status': item_status,
+                        'auction': getattr(item, 'auction', None) is not None,
+                        'condition': cond_name,
+                        'updated': getattr(item, 'updated', 0)
+                    })
+                    if len(items) >= per_keyword:
+                        break
+
+                if not items:
+                    return kw, []
+
+                if needs_review_filter:
+                    with ThreadPoolExecutor(max_workers=5) as info_pool:
+                        def enrich(item):
+                            try:
+                                full_info = getItemInfo(item['id'])
+                                if full_info is not None:
+                                    if hasattr(full_info, 'seller') and full_info.seller is not None:
+                                        item['seller_name'] = full_info.seller.name or ''
+                                        item['seller_reviews'] = full_info.seller.num_ratings or 0
+                                    if hasattr(full_info, 'item_condition') and full_info.item_condition is not None:
+                                        item['condition'] = full_info.item_condition.name or item['condition']
+                                    if hasattr(full_info, 'is_shop_item') and str(full_info.is_shop_item).lower() in ('true', '1'):
+                                        item['url'] = 'https://jp.mercari.com/shops/product/' + item['id']
+                            except Exception:
+                                item.setdefault('seller_name', '')
+                                item.setdefault('seller_reviews', 0)
+                            return item
+                        futures = [info_pool.submit(enrich, it) for it in items]
+                        items = [f.result() for f in as_completed(futures)]
+
+                    if min_reviews is not None:
+                        items = [e for e in items if e.get('seller_reviews', 0) >= min_reviews]
+                    if max_reviews is not None:
+                        items = [e for e in items if e.get('seller_reviews', 0) <= max_reviews]
+
+                for it in items:
+                    it.setdefault('seller_name', '')
+                    it.setdefault('seller_reviews', 0)
+
+                names = [it['name'] for it in items]
+                translations = batch_translate(names)
+                for i, it in enumerate(items):
+                    it['name_en'] = translations[i] if i < len(translations) else ''
+                    it['condition_en'] = COND_EN.get(it['condition'], it['condition'])
+
+                return kw, items
+            except Exception:
+                return kw, []
+
+        keywords_list = [k.strip() for k in keywords[:100] if k.strip()]
+        temp = {}
+        with ThreadPoolExecutor(max_workers=5) as kw_pool:
+            futures = {kw_pool.submit(search_keyword, kw): kw for kw in keywords_list}
+            for f in as_completed(futures):
+                kw, items = f.result()
+                temp[kw] = items
+
+        results = [{'keyword': kw, 'items': temp.get(kw, [])} for kw in keywords_list]
+        return jsonify({'results': results})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/yahoo-search')
+def api_yahoo_search():
+    keyword = request.args.get('keyword', '').strip()
+    if not keyword:
+        return jsonify({'error': 'Keyword is required'}), 400
+
+    min_price = request.args.get('min_price', '').strip()
+    max_price = request.args.get('max_price', '').strip()
+    status = request.args.get('status', 'live').strip()
+    condition = request.args.get('condition', '').strip()
+    sort = request.args.get('sort', 'new').strip()
+    bin_filter = request.args.get('bin_filter', 'all').strip()
+    page = request.args.get('page', '1').strip()
+    limit = request.args.get('limit', '20').strip()
+
+    try:
+        limit = int(limit) if limit else 20
+    except ValueError:
+        limit = 20
+    try:
+        page = int(page) if page else 1
+    except ValueError:
+        page = 1
+
+    min_price_val = None
+    max_price_val = None
+    try:
+        min_price_val = int(min_price) if min_price else None
+    except ValueError:
+        pass
+    try:
+        max_price_val = int(max_price) if max_price else None
+    except ValueError:
+        pass
+
+    try:
+        results = search_yahoo(
+            keyword=keyword,
+            min_price=min_price_val,
+            max_price=max_price_val,
+            status=status,
+            condition=condition,
+            sort=sort,
+            page=page,
+            limit=limit,
+        )
+
+        items = []
+        for item in results:
+            if bin_filter == 'bin_only' and not item.buy_now_price:
+                continue
+            items.append({
+                'id': item.id,
+                'title': item.title,
+                'price': item.price,
+                'buy_now_price': item.buy_now_price,
+                'bid_count': item.bid_count,
+                'time_remaining': item.time_remaining,
+                'end_timestamp': item.end_timestamp,
+                'seller_id': item.seller_id,
+                'thumbnail': item.thumbnail,
+                'url': item.url,
+                'free_shipping': item.free_shipping,
+                'unused': item.unused,
+                'is_new': item.is_new,
+                'status': item.status,
+                'seller_name': item.seller_name,
+            })
+
+        return jsonify({'items': items, 'count': len(items)})
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/yahoo-bulk-search', methods=['POST'])
+def api_yahoo_bulk_search():
+    try:
+        data = request.get_json()
+        if not data or 'keywords' not in data:
+            return jsonify({'error': 'Keywords required'}), 400
+        keywords = data['keywords']
+        if not isinstance(keywords, list) or not keywords:
+            return jsonify({'error': 'Keywords must be a non-empty array'}), 400
+        per_keyword = int(data.get('per_keyword', 3))
+        per_keyword = max(1, min(per_keyword, 20))
+        status = data.get('status', 'live')
+        condition = data.get('condition', '')
+        sort = data.get('sort', 'new')
+        bin_filter = data.get('bin_filter', 'all')
+        min_price = data.get('min_price', '')
+        max_price = data.get('max_price', '')
+
+        min_price_val = int(min_price) if min_price else None
+        max_price_val = int(max_price) if max_price else None
+
+        def search_keyword(kw):
+            try:
+                results = search_yahoo(
+                    keyword=kw,
+                    min_price=min_price_val,
+                    max_price=max_price_val,
+                    status=status,
+                    condition=condition,
+                    sort=sort,
+                    page=1,
+                    limit=per_keyword,
+                )
+                items = []
+                for item in results[:per_keyword]:
+                    if bin_filter == 'bin_only' and not item.buy_now_price:
+                        continue
+                    items.append({
+                        'id': item.id,
+                        'title': item.title,
+                        'price': item.price,
+                        'buy_now_price': item.buy_now_price,
+                        'bid_count': item.bid_count,
+                        'time_remaining': item.time_remaining,
+                        'seller_id': item.seller_id,
+                        'seller_name': item.seller_name,
+                        'thumbnail': item.thumbnail,
+                        'url': item.url,
+                        'free_shipping': item.free_shipping,
+                        'unused': item.unused,
+                        'is_new': item.is_new,
+                        'status': item.status,
+                    })
+                return kw, items
+            except Exception:
+                return kw, []
+
+        keywords_list = [k.strip() for k in keywords[:100] if k.strip()]
+        temp = {}
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {pool.submit(search_keyword, kw): kw for kw in keywords_list}
+            for f in as_completed(futures):
+                kw, items = f.result()
+                temp[kw] = items
+
+        results = [{'keyword': kw, 'items': temp.get(kw, [])} for kw in keywords_list]
+        return jsonify({'results': results})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/yahoo-item/<item_id>')
+def api_yahoo_item_detail(item_id):
+    try:
+        detail = get_item_detail(item_id)
+        return jsonify(detail)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/combined-bulk-search', methods=['POST'])
+def api_combined_bulk_search():
+    try:
+        data = request.get_json()
+        if not data or 'keywords' not in data:
+            return jsonify({'error': 'Keywords required'}), 400
+        keywords = data['keywords']
+        if not isinstance(keywords, list) or not keywords:
+            return jsonify({'error': 'Keywords must be a non-empty array'}), 400
+        per_keyword = int(data.get('per_keyword', 3))
+        per_keyword = max(1, min(per_keyword, 10))
+        mercari_status = data.get('mercari_status', 'all')
+        mercari_condition = data.get('mercari_condition', '')
+        yahoo_status = data.get('yahoo_status', 'live')
+        yahoo_condition = data.get('yahoo_condition', '')
+        yahoo_bin_filter = data.get('yahoo_bin_filter', 'all')
+        mercari_min_reviews = int(data.get('mercari_min_reviews', 0)) or 0
+
+        keywords_list = [k.strip() for k in keywords[:50] if k.strip()]
+
+        COND_EN = {
+            '新品、未使用': 'NEW, UNUSED',
+            '未使用に近い': 'LIKE NEW, UNUSED',
+            '目立った傷や汚れなし': 'NO NOTICEABLE SCRATCHES OR DIRT',
+            'やや傷や汚れあり': 'SLIGHT SCRATCHES OR DIRT',
+            '傷や汚れあり': 'SCRATCHES OR DIRT',
+            '全体的に状態が悪い': 'POOR CONDITION'
+        }
+        COND_IDS = {'1': '新品、未使用', '2': '未使用に近い', '3': '目立った傷や汚れなし', '4': 'やや傷や汚れあり', '5': '傷や汚れあり', '6': '全体的に状態が悪い'}
+
+        def search_mercari_kw(kw):
+            try:
+                search_results = search(kw, sort=MercariSort.SORT_SCORE, order=MercariOrder.ORDER_DESC, status=MercariSearchStatus.ON_SALE, max_items=per_keyword * 3)
+                items = []
+                for item in search_results:
+                    name = getattr(item, 'productName', None)
+                    price = getattr(item, 'price', None)
+                    if not name or price is None:
+                        continue
+                    item_status = getattr(item, 'status', '')
+                    if mercari_status == 'available' and item_status != 'ITEM_STATUS_ON_SALE':
+                        continue
+                    if mercari_status == 'sold' and item_status != 'ITEM_STATUS_SOLD_OUT':
+                        continue
+                    cond_id = str(getattr(item, 'itemConditionId', None) or '')
+                    cond_name = COND_IDS.get(cond_id, '')
+                    if mercari_condition and cond_name != mercari_condition:
+                        continue
+                    item_id = getattr(item, 'id', '')
+                    item_url = getattr(item, 'productURL', '')
+                    if getattr(item, 'isShopItem', False):
+                        item_url = 'https://jp.mercari.com/shops/product/' + item_id
+                    image_url = getattr(item, 'imageURL', '') or (item.thumbnails[0] if getattr(item, 'thumbnails', None) else '')
+                    items.append({
+                        'id': item_id,
+                        'name': name,
+                        'price': float(price),
+                        'image': image_url,
                         'url': item_url,
                         'status': item_status,
                         'auction': getattr(item, 'auction', None) is not None,
                         'condition': cond_name,
                         'condition_en': COND_EN.get(cond_name, cond_name),
-                        'updated': updated_ts,
-                        'seller_name': seller_name,
-                        'seller_reviews': seller_reviews
+                        'updated': getattr(item, 'updated', 0)
                     })
                     if len(items) >= per_keyword:
                         break
+
                 if items:
+                    with ThreadPoolExecutor(max_workers=5) as info_pool:
+                        def enrich(item):
+                            try:
+                                full_info = getItemInfo(item['id'])
+                                if full_info is not None:
+                                    if hasattr(full_info, 'seller') and full_info.seller is not None:
+                                        item['seller_name'] = full_info.seller.name or ''
+                                        item['seller_reviews'] = full_info.seller.num_ratings or 0
+                                    if hasattr(full_info, 'item_condition') and full_info.item_condition is not None:
+                                        item['condition'] = full_info.item_condition.name or item['condition']
+                                        item['condition_en'] = COND_EN.get(item['condition'], item['condition'])
+                                    if hasattr(full_info, 'is_shop_item') and str(full_info.is_shop_item).lower() in ('true', '1'):
+                                        item['url'] = 'https://jp.mercari.com/shops/product/' + item['id']
+                            except Exception:
+                                item.setdefault('seller_name', '')
+                                item.setdefault('seller_reviews', 0)
+                            return item
+                        futures = [info_pool.submit(enrich, it) for it in items]
+                        items = [f.result() for f in as_completed(futures)]
+
+                    if mercari_min_reviews > 0:
+                        items = [it for it in items if it.get('seller_reviews', 0) >= mercari_min_reviews]
+
                     names = [it['name'] for it in items]
                     translations = batch_translate(names)
                     for i, it in enumerate(items):
                         it['name_en'] = translations[i] if i < len(translations) else ''
-                results[kw] = items
+                return items
             except Exception:
-                results[kw] = []
-        return jsonify({'results': results})
+                return []
+
+        def search_yahoo_kw(kw):
+            try:
+                results = search_yahoo(
+                    keyword=kw,
+                    status=yahoo_status,
+                    condition=yahoo_condition,
+                    sort='new',
+                    page=1,
+                    limit=per_keyword,
+                )
+                yahoo_items = []
+                for item in results[:per_keyword]:
+                    if yahoo_bin_filter == 'bin_only' and not item.buy_now_price:
+                        continue
+                    yahoo_items.append({
+                        'id': item.id,
+                        'title': item.title,
+                        'price': item.price,
+                        'buy_now_price': item.buy_now_price,
+                        'bid_count': item.bid_count,
+                        'time_remaining': item.time_remaining,
+                        'seller_id': item.seller_id,
+                        'seller_name': item.seller_name,
+                        'thumbnail': item.thumbnail,
+                        'url': item.url,
+                        'free_shipping': item.free_shipping,
+                        'unused': item.unused,
+                        'is_new': item.is_new,
+                        'status': item.status,
+                    })
+                return yahoo_items
+            except Exception:
+                return []
+
+        mercari_temp = {}
+        yahoo_temp = {}
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            mercari_futures = {pool.submit(search_mercari_kw, kw): kw for kw in keywords_list}
+            yahoo_futures = {pool.submit(search_yahoo_kw, kw): kw for kw in keywords_list}
+            for f in as_completed(mercari_futures):
+                kw = mercari_futures[f]
+                mercari_temp[kw] = f.result()
+            for f in as_completed(yahoo_futures):
+                kw = yahoo_futures[f]
+                yahoo_temp[kw] = f.result()
+
+        mercari_results = [{'keyword': kw, 'items': mercari_temp.get(kw, [])} for kw in keywords_list]
+        yahoo_results = [{'keyword': kw, 'items': yahoo_temp.get(kw, [])} for kw in keywords_list]
+
+        return jsonify({
+            'keywords': keywords_list,
+            'mercari_results': mercari_results,
+            'yahoo_results': yahoo_results
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
 if __name__ == '__main__':
     print('='*60)
-    print(' Mercari JP Search GUI')
+    print(' Mercari JP Search + Yahoo Auctions GUI')
     print('='*60)
     print(' Open http://127.0.0.1:5000 in your browser')
     print(' Press CTRL+C to stop the server')

@@ -1,15 +1,18 @@
-# Mercari JP Search & GUI
+# Mercari JP Search + Yahoo Auctions GUI
 
-A Python application to search Mercari Japan products with a Web GUI. Supports both simple and bulk keyword searches with powerful filtering options.
+A Python application to search Mercari Japan and Yahoo Auctions products with a Web GUI. Supports simple, bulk, and combined cross-platform searches with powerful filtering options.
 
 ## Features
 
-- **Simple Search** — Search by keyword with price range, status, condition filters
-- **Bulk Search** — Upload a `.txt`, `.csv`, or `.xlsx` file (or paste keywords) and search multiple keywords at once
-- **Filters** — Price range, item status, condition, seller review count (bulk search)
+- **Mercari Simple Search** — Single keyword with price range, exclude keywords, status/condition filters
+- **Mercari Bulk Search** — Upload a `.txt`, `.csv`, or `.xlsx` file (or paste keywords) and search multiple Mercari keywords at once
+- **Yahoo Auctions Simple Search** — Search Yahoo Auctions with price range, status (live/sold), condition, sort, and BIN-only filters
+- **Yahoo Auctions Bulk Search** — Multi-keyword Yahoo Auctions search with CSV export
+- **Combined Mercari + Yahoo Bulk Search** — Search both platforms simultaneously with per-keyword results shown side-by-side
+- **Filters** — Price range, item status, condition, seller review count (Mercari bulk), sort order, BIN-only (Yahoo)
 - **Shop Item Detection** — Automatically detects `/shops/product/` vs `/item/` URLs
-- **Description Viewer** — View and translate item descriptions via modal
-- **CSV Export** — Download bulk search results as a CSV file
+- **Description Viewer** — View item descriptions with auto-translate from Japanese to English
+- **CSV Export** — Download search results as CSV for all search types
 - **Japanese Translation** — Product names and descriptions automatically translated to English
 
 ## Requirements
@@ -46,14 +49,19 @@ Then open **http://127.0.0.1:5000** in your browser.
 
 **Windows users** can also double-click `start_gui.bat` to launch directly.
 
-The GUI has two tabs:
+The GUI has five tabs:
 
 - **Simple Search** — Single keyword with price range, exclude keywords, status/condition filters
-- **Bulk Search** — Paste multiple keywords (one per line) or upload a `.txt` / `.csv` / `.xlsx` file. Filter by status, condition, and seller review count (min/max). Results are grouped by keyword and can be exported as CSV.
+- **Mercari Bulk Search** — Paste multiple keywords (one per line) or upload a `.txt` / `.csv` / `.xlsx` file. Filter by status, condition, and seller review count (min/max). Results are grouped by keyword and can be exported as CSV.
+- **Yahoo Auctions** — Single keyword search on Yahoo Auctions with price range, status (live/sold), condition, sort order, and BIN-only filter
+- **Yahoo Bulk** — Multi-keyword Yahoo Auctions search with file upload support and CSV export
+- **Mercari + Yahoo Bulk** — Search both platforms at once. Results are displayed side-by-side per keyword with Mercari on the left and Yahoo on the right.
 
-Click **Description** on any result to view item details and auto-translate the description from Japanese to English. Click **View** to open the item on Mercari Japan.
+Click **Description** (Mercari) or **Detail** (Yahoo) on any result to view item details with auto-translate from Japanese to English. Click **View** to open the item on the respective platform.
 
 ### MCP Server (for Claude Desktop)
+
+The MCP server exposes a `search_mercari_jp` tool that returns formatted markdown results:
 
 ```bash
 uv run server.py
@@ -75,6 +83,8 @@ Configure in `claude_desktop_config.json`:
   }
 }
 ```
+
+The server automatically limits API pagination (`max_items`) for faster responses and returns results as markdown with images and links.
 
 ## Security
 
