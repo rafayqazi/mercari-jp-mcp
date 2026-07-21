@@ -1,4 +1,5 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response, stream_with_context
+import json
 import sys
 import os
 import io
@@ -101,10 +102,12 @@ HTML_PAGE = u'''<!DOCTYPE html>
   .file-upload .file-label { font-size: 13px; color: #999; pointer-events: none; }
   .file-upload .file-label strong { color: #ea352d; }
   .bulk-keyword-count { font-size: 12px; color: #999; }
+  .count-badge.streaming { background: #fff3cd; color: #856404; font-size: 13px; }
   .bulk-result-group { margin-bottom: 16px; border: 1px solid #eee; border-radius: 10px; overflow: hidden; }
   .bulk-result-header { padding: 10px 14px; background: #f9f9f9; font-size: 14px; font-weight: 600; color: #333; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
   .bulk-result-header:hover { background: #f0f0f0; }
   .bulk-result-header .count { font-size: 12px; font-weight: 400; color: #999; }
+  .keyword-badge { font-size: 10px; font-weight: 600; color: #666; background: #f0f0f0; padding: 2px 8px; border-radius: 4px; display: inline-block; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.3px; }
   .bulk-result-body { padding: 8px 14px 14px; }
   .bulk-result-body .result-card { margin-bottom: 8px; }
   .bulk-result-body .result-card:last-child { margin-bottom: 0; }
@@ -147,11 +150,11 @@ HTML_PAGE = u'''<!DOCTYPE html>
   <h1>Mercari JP Search</h1>
   <div id="errorMsg" class="error-msg"></div>
   <div class="tabs">
-    <button class="tab-btn active" onclick="switchTab('simple')">Simple Search</button>
-    <button class="tab-btn" onclick="switchTab('bulk')">Mercari Bulk Search</button>
-    <button class="tab-btn" onclick="switchTab('yahoo')">Yahoo Auctions</button>
-    <button class="tab-btn" onclick="switchTab('yahooBulk')">Yahoo Bulk</button>
-    <button class="tab-btn" onclick="switchTab('combinedBulk')">Mercari + Yahoo Bulk</button>
+    <button class="tab-btn active" data-tab="simple" onclick="switchTab('simple')">Simple Search</button>
+    <button class="tab-btn" data-tab="bulk" onclick="switchTab('bulk')">Mercari Bulk Search</button>
+    <button class="tab-btn" data-tab="yahoo" onclick="switchTab('yahoo')">Yahoo Auctions</button>
+    <button class="tab-btn" data-tab="yahooBulk" onclick="switchTab('yahooBulk')">Yahoo Bulk</button>
+    <button class="tab-btn" data-tab="combinedBulk" onclick="switchTab('combinedBulk')">Mercari + Yahoo Bulk</button>
   </div>
   <div class="tab-content active" id="tabSimple">
   <div class="card">
@@ -530,7 +533,7 @@ function renderResults(items, keyword) {
       + (item.auction ? '<div class="result-tag auction">AUCTION</div>' : '')
       + '</div>'
       + '<div class="result-actions">'
-      + '<button class="result-link desc-btn" onclick="fetchDescription(\\''+escapeHtml(item.id)+'\\', this)">Description</button>'
+      + '<button class="result-link desc-btn" data-item-id="'+escapeHtml(item.id)+'">Description</button>'
       + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View &rarr;</a>'
       + '</div>'
       + '</div>';
@@ -558,10 +561,10 @@ function closeModal(e) {
   if (e && e.target !== e.currentTarget) return;
   document.getElementById('modalOverlay').classList.remove('active');
 }
-async function fetchDescription(itemId, btn) {
+async function fetchDescription(itemId) {
   const overlay = document.getElementById('modalOverlay');
   const body = document.getElementById('modalBody');
-  body.innerHTML = '<div class="modal-loading">Loading & translating...</div>';
+  body.innerHTML = '<div class="modal-loading">Loading &amp; translating...</div>';
   overlay.classList.add('active');
   try {
     const resp = await fetch('/api/item-info/'+encodeURIComponent(itemId));
@@ -597,10 +600,15 @@ document.getElementById('keyword').addEventListener('keydown', function(e) {
   if (e.key === 'Enter') doSearch();
 });
 function switchTab(name) {
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-  document.querySelector('.tab-btn[onclick*="'+name+'"]').classList.add('active');
-  document.getElementById('tab'+name.charAt(0).toUpperCase()+name.slice(1)).classList.add('active');
+  const targetId = 'tab' + name.charAt(0).toUpperCase() + name.slice(1);
+  document.querySelectorAll('.tab-btn').forEach(function(btn) {
+    btn.classList.remove('active');
+    if (btn.getAttribute('data-tab') === name) btn.classList.add('active');
+  });
+  document.querySelectorAll('.tab-content').forEach(function(content) {
+    content.classList.remove('active');
+    if (content.id === targetId) content.classList.add('active');
+  });
 }
 async function handleFile(e) {
   const file = e.target.files[0];
@@ -623,83 +631,120 @@ async function handleFile(e) {
 }
 function updateBulkCount() {
   const v = document.getElementById('bulkKeywords').value.trim();
-  const n = v ? v.split('\\n').filter(l => l.trim()).length : 0;
+  const n = v ? v.split('\\n').filter(function(l){ return l.trim(); }).length : 0;
   document.getElementById('bulkCount').textContent = n ? n+' keyword(s) loaded' : '';
 }
 document.getElementById('bulkKeywords').addEventListener('input', updateBulkCount);
+
+async function streamBulkSearch(url, body, onResult, onComplete, onError) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  });
+  if (!response.ok) {
+    const e = await response.json().catch(function(){ return {}; });
+    throw new Error(e.error || 'Search failed');
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const res = await reader.read();
+    if (res.done) break;
+    buffer += decoder.decode(res.value, {stream: true});
+    const parts = buffer.split('\\n\\n');
+    buffer = parts.pop();
+    for (const part of parts) {
+      for (const line of part.split('\\n')) {
+        if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.error) { if (onError) onError(data.error); return; }
+            if (data.complete) { if (onComplete) onComplete(data); return; }
+            if (onResult) onResult(data);
+          } catch(e) {}
+        }
+      }
+    }
+  }
+}
+
 async function doBulkSearch() {
   const btn = document.getElementById('bulkBtn');
   const errDiv = document.getElementById('errorMsg');
   errDiv.style.display = 'none';
   const text = document.getElementById('bulkKeywords').value.trim();
   if (!text) { showError('Enter keywords or upload a file'); return; }
-  const keywords = text.split('\\n').map(l => l.trim()).filter(l => l);
+  const keywords = text.split('\\n').map(function(l){ return l.trim(); }).filter(function(l){ return l; });
   if (!keywords.length) { showError('No valid keywords found'); return; }
   if (keywords.length > 100) { showError('Maximum 100 keywords allowed'); return; }
   btn.classList.add('loading'); btn.disabled = true;
+  const total = keywords.length;
+  const container = document.getElementById('bulkResults');
+  container.innerHTML = '<div class="count-badge streaming">Searching... 0/'+total+'</div><div id="mercariBulkGroups"></div>';
+  window._bulkCSV = [];
+  let doneCount = 0;
   try {
-    const resp = await fetch('/api/bulk-search', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        keywords: keywords,
-        per_keyword: parseInt(document.getElementById('bulkLimit').value) || 3,
-        status_filter: document.getElementById('bulkStatus').value,
-        condition: document.getElementById('bulkCondition').value,
-        min_reviews: parseInt(document.getElementById('bulkMinReviews').value) || '',
-        max_reviews: parseInt(document.getElementById('bulkMaxReviews').value) || ''
-      })
+    await streamBulkSearch('/api/bulk-search', {
+      keywords: keywords,
+      per_keyword: parseInt(document.getElementById('bulkLimit').value) || 3,
+      status_filter: document.getElementById('bulkStatus').value,
+      condition: document.getElementById('bulkCondition').value,
+      min_reviews: parseInt(document.getElementById('bulkMinReviews').value) || '',
+      max_reviews: parseInt(document.getElementById('bulkMaxReviews').value) || ''
+    }, function(data) {
+      appendBulkResult(data.keyword, data.items);
+      doneCount++;
+      const badge = container.querySelector('.count-badge');
+      if (badge) badge.innerHTML = 'Searching... '+doneCount+'/'+total;
+    }, function() {
+      const badge = container.querySelector('.count-badge');
+      if (badge) badge.innerHTML = 'Results for <strong>'+doneCount+'</strong> keyword(s)';
+      const groups = document.getElementById('mercariBulkGroups');
+      if (groups) {
+        const dl = document.createElement('button');
+        dl.className = 'dl-btn'; dl.style.marginTop = '12px';
+        dl.textContent = 'Download CSV'; dl.onclick = downloadCSV;
+        groups.appendChild(dl);
+      }
     });
-    if (!resp.ok) { const e = await resp.json(); throw new Error(e.error || 'Search failed'); }
-    const data = await resp.json();
-    renderBulkResults(data.results);
   } catch(e) { showError(e.message); }
   finally { btn.classList.remove('loading'); btn.disabled = false; }
 }
-function renderBulkResults(results) {
-  const container = document.getElementById('bulkResults');
-  if (!results || !results.length) {
-    container.innerHTML = '<div class="status"><div class="emoji">&#x1F622;</div><p>No results found</p></div>';
-    return;
+function appendBulkResult(kw, items) {
+  const groups = document.getElementById('mercariBulkGroups');
+  if (!groups) return;
+  if (!items || !items.length) return;
+  let html = '<div class="bulk-result-group"><div class="bulk-result-header" onclick="toggleBulkGroup(this)">'
+    + escapeHtml(kw) + ' <span class="count">'+items.length+' item(s)</span></div>'
+    + '<div class="bulk-result-body"><div class="results">';
+  for (const item of items) {
+    const name = item.name_en || item.name;
+    html += '<div class="result-card">'
+      + (item.image ? '<div class="result-thumb"><img src="'+escapeHtml(item.image)+'" alt="" loading="lazy" onerror="handleImageError(this)"></div>' : '<div class="result-icon">&#x1F4E6;</div>')
+      + '<div class="result-info"><div class="result-name">'+escapeHtml(name)+'</div>'
+      + '<div class="result-price">&yen;'+Number(item.price).toLocaleString()+' <span>JPY</span></div>'
+    + (item.updated ? '<div class="result-updated">Updated: '+timeAgo(item.updated)+'</div>' : '')
+    + (item.condition_en ? '<div class="result-condition">'+escapeHtml(item.condition_en)+'</div>' : '')
+    + (item.seller_name ? '<div class="result-seller">Seller: '+escapeHtml(item.seller_name)+' ('+item.seller_reviews+' reviews)</div>' : '')
+      + (item.status === 'ITEM_STATUS_SOLD_OUT' ? '<div class="result-tag sold">SOLD OUT</div>' : '')
+      + (item.auction ? '<div class="result-tag auction">AUCTION</div>' : '')
+      + '</div>'
+      + '<div class="result-actions">'
+      + '<button class="result-link desc-btn" data-item-id="'+escapeHtml(item.id)+'">Desc</button>'
+      + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View</a>'
+      + '</div></div>';
+    window._bulkCSV.push({keyword: kw, name: name, price: item.price, url: item.url, status: item.status, condition_en: item.condition_en, seller_name: item.seller_name, seller_reviews: item.seller_reviews, updated: item.updated});
   }
-  let html = '<div class="count-badge">Results for <strong>'+results.length+'</strong> keyword(s)</div>';
-  html += '<button class="dl-btn" onclick="downloadCSV()">Download CSV</button>';
-  let csvData = [];
-  for (const group of results) {
-    const kw = group.keyword;
-    const items = group.items || [];
-    html += '<div class="bulk-result-group"><div class="bulk-result-header" onclick="toggleBulkGroup(this)"'
-      + escapeHtml(kw) + ' <span class="count">'+items.length+' item(s)</span></div>'
-      + '<div class="bulk-result-body"><div class="results">';
-    for (const item of items) {
-      const name = item.name_en || item.name;
-      html += '<div class="result-card">'
-        + (item.image ? '<div class="result-thumb"><img src="'+escapeHtml(item.image)+'" alt="" loading="lazy" onerror="handleImageError(this)"></div>' : '<div class="result-icon">&#x1F4E6;</div>')
-        + '<div class="result-info"><div class="result-name">'+escapeHtml(name)+'</div>'
-        + '<div class="result-price">&yen;'+Number(item.price).toLocaleString()+' <span>JPY</span></div>'
-      + (item.updated ? '<div class="result-updated">Updated: '+timeAgo(item.updated)+'</div>' : '')
-      + (item.condition_en ? '<div class="result-condition">'+escapeHtml(item.condition_en)+'</div>' : '')
-      + (item.seller_name ? '<div class="result-seller">Seller: '+escapeHtml(item.seller_name)+' ('+item.seller_reviews+' reviews)</div>' : '')
-        + (item.status === 'ITEM_STATUS_SOLD_OUT' ? '<div class="result-tag sold">SOLD OUT</div>' : '')
-        + (item.auction ? '<div class="result-tag auction">AUCTION</div>' : '')
-        + '</div>'
-        + '<div class="result-actions">'
-        + '<button class="result-link desc-btn" onclick="fetchDescription(\'+escapeHtml(item.id)+'\\', this)">Desc</button>'
-        + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View</a>'
-        + '</div></div>';
-      csvData.push({keyword: kw, name: name, price: item.price, url: item.url, status: item.status, condition_en: item.condition_en, seller_name: item.seller_name, seller_reviews: item.seller_reviews, updated: item.updated});
-    }
-    html += '</div></div></div>';
-  }
-  window._bulkCSV = csvData;
-  html += '<button class="dl-btn" onclick="downloadCSV()" style="margin-top:12px;">Download CSV</button>';
-  container.innerHTML = html;
+  html += '</div></div></div>';
+  groups.insertAdjacentHTML('beforeend', html);
 }
 
 function downloadCSV() {
   const data = window._bulkCSV || [];
   if (!data.length) return;
-  let csv = '\\uFEFFKeyword,Name,Price JPY,URL,Status,Condition,Seller,Reviews,Updated\\n';
+  let csv = '\uFEFFKeyword,Name,Price JPY,URL,Status,Condition,Seller,Reviews,Updated\\n';
   for (const r of data) {
     csv += '"'+r.keyword+'","'+(r.name||'').replace(/"/g,'""')+'",'+r.price+',"'+r.url+'","'+r.status+'","'+(r.condition_en||'')+'","'+(r.seller_name||'')+'","'+(r.seller_reviews||'')+'","'+(r.updated?timeAgo(r.updated):'')+'"\\n';
   }
@@ -775,7 +820,7 @@ function renderYahooResults(items, keyword) {
       + '<div>'+badges.join(' ')+'</div>'
       + '</div>'
       + '<div class="yahoo-actions">'
-      + '<button class="result-link desc-btn" onclick="fetchYahooDescription(\'+escapeHtml(item.id)+'\\', this)">Detail</button>'
+      + '<button class="result-link desc-btn" data-yahoo-id="'+escapeHtml(item.id)+'">Detail</button>'
       + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View &rarr;</a>'
       + '</div>'
       + '</div>';
@@ -784,7 +829,7 @@ function renderYahooResults(items, keyword) {
   container.innerHTML = html;
 }
 
-async function fetchYahooDescription(itemId, btn) {
+async function fetchYahooDescription(itemId) {
   const overlay = document.getElementById('modalOverlay');
   const body = document.getElementById('modalBody');
   body.innerHTML = '<div class="modal-loading">Loading item detail...</div>';
@@ -813,7 +858,7 @@ async function fetchYahooDescription(itemId, btn) {
 function downloadYahooCSV() {
   const data = _yahooItems;
   if (!data.length) return;
-  let csv = '\\uFEFFTitle,Price JPY,BuyNow JPY,Bids,Time Remaining,Seller,Status,Free Shipping,URL\\n';
+  let csv = '\uFEFFTitle,Price JPY,BuyNow JPY,Bids,Time Remaining,Seller,Status,Free Shipping,URL\\n';
   for (const r of data) {
     csv += '"'+(r.title||'').replace(/"/g,'""')+'",'+r.price+','+(r.buy_now_price||'')+','+r.bid_count+',"'+escapeHtml(r.time_remaining)+'","'+(r.seller_name||r.seller_id||'')+'","'+r.status+'","'+(r.free_shipping?'Yes':'No')+'","'+r.url+'"\\n';
   }
@@ -826,7 +871,7 @@ document.getElementById('yahooBulkKeywords').addEventListener('input', updateYah
 
 function updateYahooBulkCount() {
   const v = document.getElementById('yahooBulkKeywords').value.trim();
-  const n = v ? v.split('\\n').filter(l => l.trim()).length : 0;
+  const n = v ? v.split('\\n').filter(function(l){ return l.trim(); }).length : 0;
   document.getElementById('yahooBulkCount').textContent = n ? n+' keyword(s) loaded' : '';
 }
 
@@ -856,87 +901,90 @@ async function doYahooBulkSearch() {
   errDiv.style.display = 'none';
   const text = document.getElementById('yahooBulkKeywords').value.trim();
   if (!text) { showError('Enter keywords or upload a file'); return; }
-  const keywords = text.split('\\n').map(l => l.trim()).filter(l => l);
+  const keywords = text.split('\\n').map(function(l){ return l.trim(); }).filter(function(l){ return l; });
   if (!keywords.length) { showError('No valid keywords found'); return; }
   if (keywords.length > 100) { showError('Maximum 100 keywords allowed'); return; }
   btn.classList.add('loading'); btn.disabled = true;
+  const total = keywords.length;
+  const container = document.getElementById('yahooBulkResults');
+  container.innerHTML = '<div class="count-badge streaming">Searching... 0/'+total+'</div><div id="yahooBulkGroups"></div>';
+  window._yahooBulkCSV = [];
+  let doneCount = 0;
   try {
-    const resp = await fetch('/api/yahoo-bulk-search', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        keywords: keywords,
-        per_keyword: parseInt(document.getElementById('yahooBulkLimit').value) || 3,
-        status: document.getElementById('yahooBulkStatus').value,
-        condition: document.getElementById('yahooBulkCondition').value,
-        sort: document.getElementById('yahooBulkSort').value,
-        bin_filter: document.getElementById('yahooBulkBIN').value,
-        min_price: document.getElementById('yahooBulkMinPrice').value || '',
-        max_price: document.getElementById('yahooBulkMaxPrice').value || ''
-      })
+    await streamBulkSearch('/api/yahoo-bulk-search', {
+      keywords: keywords,
+      per_keyword: parseInt(document.getElementById('yahooBulkLimit').value) || 3,
+      status: document.getElementById('yahooBulkStatus').value,
+      condition: document.getElementById('yahooBulkCondition').value,
+      sort: document.getElementById('yahooBulkSort').value,
+      bin_filter: document.getElementById('yahooBulkBIN').value,
+      min_price: document.getElementById('yahooBulkMinPrice').value || '',
+      max_price: document.getElementById('yahooBulkMaxPrice').value || ''
+    }, function(data) {
+      appendYahooBulkResult(data.keyword, data.items);
+      doneCount++;
+      const badge = container.querySelector('.count-badge');
+      if (badge) badge.innerHTML = 'Searching... '+doneCount+'/'+total;
+    }, function() {
+      const badge = container.querySelector('.count-badge');
+      if (badge) badge.innerHTML = 'Results for <strong>'+doneCount+'</strong> keyword(s)';
+      const groups = document.getElementById('yahooBulkGroups');
+      if (groups) {
+        const dl = document.createElement('button');
+        dl.className = 'dl-btn'; dl.style.marginTop = '12px';
+        dl.textContent = 'Download CSV'; dl.onclick = downloadYahooBulkCSV;
+        groups.appendChild(dl);
+      }
     });
-    if (!resp.ok) { const e = await resp.json(); throw new Error(e.error || 'Search failed'); }
-    const data = await resp.json();
-    renderYahooBulkResults(data.results);
   } catch(e) { showError(e.message); }
   finally { btn.classList.remove('loading'); btn.disabled = false; }
 }
 
-function renderYahooBulkResults(results) {
-  const container = document.getElementById('yahooBulkResults');
-  if (!results || !results.length) {
-    container.innerHTML = '<div class="status"><div class="emoji">&#x1F622;</div><p>No results found</p></div>';
-    return;
-  }
-  let html = '<div class="count-badge">Results for <strong>'+results.length+'</strong> keyword(s)</div>';
-  let csvData = [];
-  for (const group of results) {
-    const kw = group.keyword;
-    const items = group.items || [];
-    html += '<div class="bulk-result-group"><div class="bulk-result-header" onclick="toggleBulkGroup(this)"'
-      + escapeHtml(kw) + ' <span class="count">'+items.length+' item(s)</span></div>'
-      + '<div class="bulk-result-body"><div class="results">';
-    for (const item of items) {
-      const badges = [];
-      if (item.status === 'sold') badges.push('<span class="yahoo-badge sold">SOLD</span>');
-      if (item.free_shipping) badges.push('<span class="yahoo-badge freeship">FREE SHIP</span>');
-      if (item.unused) badges.push('<span class="yahoo-badge unused">UNUSED</span>');
-      if (item.is_new) badges.push('<span class="yahoo-badge newitem">NEW</span>');
+function appendYahooBulkResult(kw, items) {
+  const groups = document.getElementById('yahooBulkGroups');
+  if (!groups) return;
+  if (!items || !items.length) return;
+  let html = '<div class="bulk-result-group"><div class="bulk-result-header" onclick="toggleBulkGroup(this)">'
+    + escapeHtml(kw) + ' <span class="count">'+items.length+' item(s)</span></div>'
+    + '<div class="bulk-result-body"><div class="results">';
+  for (const item of items) {
+    const badges = [];
+    if (item.status === 'sold') badges.push('<span class="yahoo-badge sold">SOLD</span>');
+    if (item.free_shipping) badges.push('<span class="yahoo-badge freeship">FREE SHIP</span>');
+    if (item.unused) badges.push('<span class="yahoo-badge unused">UNUSED</span>');
+    if (item.is_new) badges.push('<span class="yahoo-badge newitem">NEW</span>');
 
-      html += '<div class="yahoo-result-card">'
-        + '<div class="yahoo-thumb">'
-        + (item.thumbnail ? '<img src="'+escapeHtml(item.thumbnail)+'" alt="" loading="lazy" onerror="handleImageError(this)">' : '<div class="yahoo-thumb-placeholder">&#x1F4E6;</div>')
-        + '</div>'
-        + '<div class="yahoo-info">'
-        + '<div class="yahoo-title">'+escapeHtml(item.title)+'</div>'
-        + '<div class="yahoo-price-row">'
-        + '<div class="yahoo-price">&yen;'+Number(item.price).toLocaleString()+' <span>JPY</span></div>'
-        + (item.buy_now_price ? '<div class="yahoo-buynow">BIN &yen;'+Number(item.buy_now_price).toLocaleString()+'</div>' : '')
-        + '</div>'
-        + '<div class="yahoo-meta">'
-        + '<span>&#x1F3F7; '+item.bid_count+' bid'+(item.bid_count!==1?'s':'')+'</span>'
-        + (item.time_remaining ? '<span>&#x23F3; '+escapeHtml(item.time_remaining)+'</span>' : '')
-        + '<span>&#x1F464; '+escapeHtml(item.seller_name || item.seller_id || 'Unknown')+'</span>'
-        + '</div>'
-        + '<div>'+badges.join(' ')+'</div>'
-        + '</div>'
-        + '<div class="yahoo-actions">'
-        + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View &rarr;</a>'
-        + '</div>'
-        + '</div>';
-      csvData.push({keyword: kw, title: item.title, price: item.price, buy_now_price: item.buy_now_price, bid_count: item.bid_count, time_remaining: item.time_remaining, seller: item.seller_name || item.seller_id, status: item.status, free_shipping: item.free_shipping, url: item.url});
-    }
-    html += '</div></div></div>';
+    html += '<div class="yahoo-result-card">'
+      + '<div class="yahoo-thumb">'
+      + (item.thumbnail ? '<img src="'+escapeHtml(item.thumbnail)+'" alt="" loading="lazy" onerror="handleImageError(this)">' : '<div class="yahoo-thumb-placeholder">&#x1F4E6;</div>')
+      + '</div>'
+      + '<div class="yahoo-info">'
+      + '<div class="yahoo-title">'+escapeHtml(item.title)+'</div>'
+      + '<div class="yahoo-price-row">'
+      + '<div class="yahoo-price">&yen;'+Number(item.price).toLocaleString()+' <span>JPY</span></div>'
+      + (item.buy_now_price ? '<div class="yahoo-buynow">BIN &yen;'+Number(item.buy_now_price).toLocaleString()+'</div>' : '')
+      + '</div>'
+      + '<div class="yahoo-meta">'
+      + '<span>&#x1F3F7; '+item.bid_count+' bid'+(item.bid_count!==1?'s':'')+'</span>'
+      + (item.time_remaining ? '<span>&#x23F3; '+escapeHtml(item.time_remaining)+'</span>' : '')
+      + '<span>&#x1F464; '+escapeHtml(item.seller_name || item.seller_id || 'Unknown')+'</span>'
+      + '</div>'
+      + '<div>'+badges.join(' ')+'</div>'
+      + '</div>'
+      + '<div class="yahoo-actions">'
+      + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View &rarr;</a>'
+      + '</div>'
+      + '</div>';
+    window._yahooBulkCSV.push({keyword: kw, title: item.title, price: item.price, buy_now_price: item.buy_now_price, bid_count: item.bid_count, time_remaining: item.time_remaining, seller: item.seller_name || item.seller_id, status: item.status, free_shipping: item.free_shipping, url: item.url});
   }
-  window._yahooBulkCSV = csvData;
-  html += '<button class="dl-btn" onclick="downloadYahooBulkCSV()" style="margin-top:12px;">Download CSV</button>';
-  container.innerHTML = html;
+  html += '</div></div></div>';
+  groups.insertAdjacentHTML('beforeend', html);
 }
 
 function downloadYahooBulkCSV() {
   const data = window._yahooBulkCSV || [];
   if (!data.length) return;
-  let csv = '\\uFEFFKeyword,Title,Price JPY,BuyNow JPY,Bids,Time Remaining,Seller,Status,Free Shipping,URL\\n';
+  let csv = '\uFEFFKeyword,Title,Price JPY,BuyNow JPY,Bids,Time Remaining,Seller,Status,Free Shipping,URL\\n';
   for (const r of data) {
     csv += '"'+r.keyword+'","'+(r.title||'').replace(/"/g,'""')+'",'+r.price+','+(r.buy_now_price||'')+','+r.bid_count+',"'+escapeHtml(r.time_remaining)+'","'+(r.seller||'')+'","'+r.status+'","'+(r.free_shipping?'Yes':'No')+'","'+r.url+'"\\n';
   }
@@ -949,7 +997,7 @@ document.getElementById('combinedKeywords').addEventListener('input', updateComb
 
 function updateCombinedCount() {
   const v = document.getElementById('combinedKeywords').value.trim();
-  const n = v ? v.split('\\n').filter(l => l.trim()).length : 0;
+  const n = v ? v.split('\\n').filter(function(l){ return l.trim(); }).length : 0;
   document.getElementById('combinedCount').textContent = n ? n+' keyword(s) loaded' : '';
 }
 
@@ -979,127 +1027,118 @@ async function doCombinedBulkSearch() {
   errDiv.style.display = 'none';
   const text = document.getElementById('combinedKeywords').value.trim();
   if (!text) { showError('Enter keywords or upload a file'); return; }
-  const keywords = text.split('\\n').map(l => l.trim()).filter(l => l);
+  const keywords = text.split('\\n').map(function(l){ return l.trim(); }).filter(function(l){ return l; });
   if (!keywords.length) { showError('No valid keywords found'); return; }
   if (keywords.length > 50) { showError('Maximum 50 keywords allowed'); return; }
   btn.classList.add('loading'); btn.disabled = true;
+  const total = keywords.length;
+  const container = document.getElementById('combinedResults');
+  container.innerHTML = '<div class="count-badge streaming">Searching... 0/'+total+'</div><div id="combinedGroups"></div>';
+  let doneCount = 0;
   try {
-    const resp = await fetch('/api/combined-bulk-search', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        keywords: keywords,
-        per_keyword: parseInt(document.getElementById('combinedLimit').value) || 3,
-        mercari_status: document.getElementById('combinedStatus').value,
-        mercari_condition: document.getElementById('combinedCondition').value,
-        mercari_min_reviews: parseInt(document.getElementById('combinedMinReviews').value) || 0,
-        yahoo_status: document.getElementById('combinedYahooStatus').value,
-        yahoo_condition: document.getElementById('combinedYahooCondition').value,
-        yahoo_bin_filter: document.getElementById('combinedYahooBIN').value
-      })
+    await streamBulkSearch('/api/combined-bulk-search', {
+      keywords: keywords,
+      per_keyword: parseInt(document.getElementById('combinedLimit').value) || 3,
+      mercari_status: document.getElementById('combinedStatus').value,
+      mercari_condition: document.getElementById('combinedCondition').value,
+      mercari_min_reviews: parseInt(document.getElementById('combinedMinReviews').value) || 0,
+      yahoo_status: document.getElementById('combinedYahooStatus').value,
+      yahoo_condition: document.getElementById('combinedYahooCondition').value,
+      yahoo_bin_filter: document.getElementById('combinedYahooBIN').value
+    }, function(data) {
+      appendCombinedResult(data.keyword, data.mercari_items || [], data.yahoo_items || []);
+      doneCount++;
+      const badge = container.querySelector('.count-badge');
+      if (badge) badge.innerHTML = 'Searching... '+doneCount+'/'+total;
+    }, function() {
+      const badge = container.querySelector('.count-badge');
+      if (badge) badge.innerHTML = 'Results for <strong>'+doneCount+'</strong> keyword(s)';
     });
-    if (!resp.ok) { const e = await resp.json(); throw new Error(e.error || 'Search failed'); }
-    const data = await resp.json();
-    renderCombinedResults(data);
   } catch(e) { showError(e.message); }
   finally { btn.classList.remove('loading'); btn.disabled = false; }
 }
 
-function renderCombinedResults(data) {
-  const container = document.getElementById('combinedResults');
-  if (!data.mercari_results && !data.yahoo_results) {
-    container.innerHTML = '<div class="status"><div class="emoji">&#x1F622;</div><p>No results found</p></div>';
-    return;
-  }
-  const mercariMap = {};
-  const yahooMap = {};
-  const allKeywords = data.keywords || [];
+function appendCombinedResult(kw, mercariItems, yahooItems) {
+  const groups = document.getElementById('combinedGroups');
+  if (!groups) return;
+  if (!mercariItems.length && !yahooItems.length) return;
 
-  if (data.mercari_results) {
-    for (const g of data.mercari_results) {
-      mercariMap[g.keyword] = g.items || [];
+  let html = '<div class="bulk-result-group">'
+    + '<div class="bulk-result-header" onclick="toggleBulkGroup(this)">'
+    + escapeHtml(kw) + ' <span class="count">Mercari: '+mercariItems.length+' &middot; Yahoo: '+yahooItems.length+'</span></div>'
+    + '<div class="bulk-result-body"><div class="combined-grid">'
+    + '<div class="combined-col"><h3 class="mercari-header">&#x1F4E6; Mercari</h3>';
+
+  if (mercariItems.length) {
+    for (const item of mercariItems) {
+      const name = item.name_en || item.name;
+      html += '<div class="result-card" style="margin-bottom:8px;">'
+        + (item.image ? '<div class="result-thumb"><img src="'+escapeHtml(item.image)+'" alt="" loading="lazy" onerror="handleImageError(this)"></div>' : '<div class="result-icon">&#x1F4E6;</div>')
+        + '<div class="result-info"><div class="result-name">'+escapeHtml(name)+'</div>'
+        + '<div class="result-price">&yen;'+Number(item.price).toLocaleString()+' <span>JPY</span></div>'
+        + (item.condition_en ? '<div class="result-condition">'+escapeHtml(item.condition_en)+'</div>' : '')
+        + (item.seller_name ? '<div class="result-seller">'+escapeHtml(item.seller_name)+' ('+item.seller_reviews+' reviews)</div>' : '')
+        + (item.status === 'ITEM_STATUS_SOLD_OUT' ? '<div class="result-tag sold">SOLD OUT</div>' : '')
+        + '</div>'
+        + '<div class="result-actions">'
+        + '<button class="result-link desc-btn" data-item-id="'+escapeHtml(item.id)+'">Description</button>'
+        + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View</a>'
+        + '</div></div>';
     }
+  } else {
+    html += '<div class="status" style="padding:16px;font-size:12px;">&#x1F622; No Mercari results</div>';
   }
-  if (data.yahoo_results) {
-    for (const g of data.yahoo_results) {
-      yahooMap[g.keyword] = g.items || [];
+
+  html += '</div><div class="combined-col"><h3 class="yahoo-header">&#x1F4E6; Yahoo Auctions</h3>';
+
+  if (yahooItems.length) {
+    for (const item of yahooItems) {
+      const badges = [];
+      if (item.status === 'sold') badges.push('<span class="yahoo-badge sold">SOLD</span>');
+      if (item.free_shipping) badges.push('<span class="yahoo-badge freeship">FREE SHIP</span>');
+
+      html += '<div class="yahoo-result-card" style="margin-bottom:8px;">'
+        + '<div class="yahoo-thumb" style="width:60px;min-height:60px;">'
+        + (item.thumbnail ? '<img src="'+escapeHtml(item.thumbnail)+'" alt="" loading="lazy" onerror="handleImageError(this)">' : '<div class="yahoo-thumb-placeholder">&#x1F4E6;</div>')
+        + '</div>'
+        + '<div class="yahoo-info">'
+        + '<div class="yahoo-title">'+escapeHtml(item.title)+'</div>'
+        + '<div class="yahoo-price-row">'
+        + '<div class="yahoo-price">&yen;'+Number(item.price).toLocaleString()+' <span>JPY</span></div>'
+        + (item.buy_now_price ? '<div class="yahoo-buynow">BIN &yen;'+Number(item.buy_now_price).toLocaleString()+'</div>' : '')
+        + '</div>'
+        + '<div class="yahoo-meta">'
+        + '<span>'+item.bid_count+' bid'+(item.bid_count!==1?'s':'')+'</span>'
+        + (item.time_remaining ? '<span>'+escapeHtml(item.time_remaining)+'</span>' : '')
+        + '</div>'
+        + '<div>'+badges.join(' ')+'</div>'
+        + '</div>'
+        + '<div class="yahoo-actions">'
+        + '<button class="result-link desc-btn" data-yahoo-id="'+escapeHtml(item.id)+'">Detail</button>'
+        + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View</a>'
+        + '</div></div>';
     }
+  } else {
+    html += '<div class="status" style="padding:16px;font-size:12px;">&#x1F622; No Yahoo results</div>';
   }
 
-  if (!allKeywords.length) {
-    container.innerHTML = '<div class="status"><div class="emoji">&#x1F622;</div><p>No results found</p></div>';
-    return;
-  }
-
-  let html = '<div class="count-badge">Results for <strong>'+allKeywords.length+'</strong> keyword(s)</div>';
-  for (const kw of allKeywords) {
-    const mercariItems = mercariMap[kw] || [];
-    const yahooItems = yahooMap[kw] || [];
-    if (!mercariItems.length && !yahooItems.length) continue;
-
-    html += '<div class="bulk-result-group">'
-      + '<div class="bulk-result-header" onclick="toggleBulkGroup(this)"'
-      + escapeHtml(kw) + ' <span class="count">Mercari: '+mercariItems.length+' &middot; Yahoo: '+yahooItems.length+'</span></div>'
-      + '<div class="bulk-result-body"><div class="combined-grid">'
-      + '<div class="combined-col"><h3 class="mercari-header">&#x1F4E6; Mercari</h3>';
-
-    if (mercariItems.length) {
-      for (const item of mercariItems) {
-        const name = item.name_en || item.name;
-        html += '<div class="result-card" style="margin-bottom:8px;">'
-          + (item.image ? '<div class="result-thumb"><img src="'+escapeHtml(item.image)+'" alt="" loading="lazy" onerror="handleImageError(this)"></div>' : '<div class="result-icon">&#x1F4E6;</div>')
-          + '<div class="result-info"><div class="result-name">'+escapeHtml(name)+'</div>'
-          + '<div class="result-price">&yen;'+Number(item.price).toLocaleString()+' <span>JPY</span></div>'
-          + (item.condition_en ? '<div class="result-condition">'+escapeHtml(item.condition_en)+'</div>' : '')
-          + (item.seller_name ? '<div class="result-seller">'+escapeHtml(item.seller_name)+' ('+item.seller_reviews+' reviews)</div>' : '')
-          + (item.status === 'ITEM_STATUS_SOLD_OUT' ? '<div class="result-tag sold">SOLD OUT</div>' : '')
-          + '</div>'
-          + '<div class="result-actions">'
-          + '<button class="result-link desc-btn" onclick="fetchDescription(\\''+escapeHtml(item.id)+'\\', this)">Description</button>'
-          + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View</a>'
-          + '</div></div>';
-      }
-    } else {
-      html += '<div class="status" style="padding:16px;font-size:12px;">&#x1F622; No Mercari results</div>';
-    }
-
-    html += '</div><div class="combined-col"><h3 class="yahoo-header">&#x1F4E6; Yahoo Auctions</h3>';
-
-    if (yahooItems.length) {
-      for (const item of yahooItems) {
-        const badges = [];
-        if (item.status === 'sold') badges.push('<span class="yahoo-badge sold">SOLD</span>');
-        if (item.free_shipping) badges.push('<span class="yahoo-badge freeship">FREE SHIP</span>');
-
-        html += '<div class="yahoo-result-card" style="margin-bottom:8px;">'
-          + '<div class="yahoo-thumb" style="width:60px;min-height:60px;">'
-          + (item.thumbnail ? '<img src="'+escapeHtml(item.thumbnail)+'" alt="" loading="lazy" onerror="handleImageError(this)">' : '<div class="yahoo-thumb-placeholder">&#x1F4E6;</div>')
-          + '</div>'
-          + '<div class="yahoo-info">'
-          + '<div class="yahoo-title">'+escapeHtml(item.title)+'</div>'
-          + '<div class="yahoo-price-row">'
-          + '<div class="yahoo-price">&yen;'+Number(item.price).toLocaleString()+' <span>JPY</span></div>'
-          + (item.buy_now_price ? '<div class="yahoo-buynow">BIN &yen;'+Number(item.buy_now_price).toLocaleString()+'</div>' : '')
-          + '</div>'
-          + '<div class="yahoo-meta">'
-          + '<span>'+item.bid_count+' bid'+(item.bid_count!==1?'s':'')+'</span>'
-          + (item.time_remaining ? '<span>'+escapeHtml(item.time_remaining)+'</span>' : '')
-          + '</div>'
-          + '<div>'+badges.join(' ')+'</div>'
-          + '</div>'
-          + '<div class="yahoo-actions">'
-          + '<button class="result-link desc-btn" onclick="fetchYahooDescription(\\''+escapeHtml(item.id)+'\\', this)">Detail</button>'
-          + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View</a>'
-          + '</div></div>';
-      }
-    } else {
-      html += '<div class="status" style="padding:16px;font-size:12px;">&#x1F622; No Yahoo results</div>';
-    }
-
-    html += '</div></div></div></div>';
-  }
-  container.innerHTML = html;
+  html += '</div></div></div></div>';
+  groups.insertAdjacentHTML('beforeend', html);
 }
+
+// Event delegation for description buttons
+document.addEventListener('click', function(e) {
+  const mercariBtn = e.target.closest('[data-item-id]');
+  if (mercariBtn) {
+    fetchDescription(mercariBtn.getAttribute('data-item-id'));
+    return;
+  }
+  const yahooBtn = e.target.closest('[data-yahoo-id]');
+  if (yahooBtn) {
+    fetchYahooDescription(yahooBtn.getAttribute('data-yahoo-id'));
+    return;
+  }
+});
 </script>
 </body>
 </html>'''
@@ -1432,15 +1471,16 @@ def api_bulk_search():
                 return kw, []
 
         keywords_list = [k.strip() for k in keywords[:100] if k.strip()]
-        temp = {}
-        with ThreadPoolExecutor(max_workers=5) as kw_pool:
-            futures = {kw_pool.submit(search_keyword, kw): kw for kw in keywords_list}
-            for f in as_completed(futures):
-                kw, items = f.result()
-                temp[kw] = items
 
-        results = [{'keyword': kw, 'items': temp.get(kw, [])} for kw in keywords_list]
-        return jsonify({'results': results})
+        def generate():
+            with ThreadPoolExecutor(max_workers=5) as kw_pool:
+                futures = {kw_pool.submit(search_keyword, kw): kw for kw in keywords_list}
+                for f in as_completed(futures):
+                    kw, items = f.result()
+                    yield 'data: ' + json.dumps({'keyword': kw, 'items': items}, ensure_ascii=False) + '\n\n'
+            yield 'data: ' + json.dumps({'complete': True, 'keywords': keywords_list}, ensure_ascii=False) + '\n\n'
+
+        return Response(stream_with_context(generate()), mimetype='text/event-stream')
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -1577,15 +1617,16 @@ def api_yahoo_bulk_search():
                 return kw, []
 
         keywords_list = [k.strip() for k in keywords[:100] if k.strip()]
-        temp = {}
-        with ThreadPoolExecutor(max_workers=5) as pool:
-            futures = {pool.submit(search_keyword, kw): kw for kw in keywords_list}
-            for f in as_completed(futures):
-                kw, items = f.result()
-                temp[kw] = items
 
-        results = [{'keyword': kw, 'items': temp.get(kw, [])} for kw in keywords_list]
-        return jsonify({'results': results})
+        def generate():
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                futures = {pool.submit(search_keyword, kw): kw for kw in keywords_list}
+                for f in as_completed(futures):
+                    kw, items = f.result()
+                    yield 'data: ' + json.dumps({'keyword': kw, 'items': items}, ensure_ascii=False) + '\n\n'
+            yield 'data: ' + json.dumps({'complete': True, 'keywords': keywords_list}, ensure_ascii=False) + '\n\n'
+
+        return Response(stream_with_context(generate()), mimetype='text/event-stream')
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -1733,26 +1774,39 @@ def api_combined_bulk_search():
             except Exception:
                 return []
 
+        keywords_done = set()
         mercari_temp = {}
         yahoo_temp = {}
-        with ThreadPoolExecutor(max_workers=10) as pool:
-            mercari_futures = {pool.submit(search_mercari_kw, kw): kw for kw in keywords_list}
-            yahoo_futures = {pool.submit(search_yahoo_kw, kw): kw for kw in keywords_list}
-            for f in as_completed(mercari_futures):
-                kw = mercari_futures[f]
-                mercari_temp[kw] = f.result()
-            for f in as_completed(yahoo_futures):
-                kw = yahoo_futures[f]
-                yahoo_temp[kw] = f.result()
 
-        mercari_results = [{'keyword': kw, 'items': mercari_temp.get(kw, [])} for kw in keywords_list]
-        yahoo_results = [{'keyword': kw, 'items': yahoo_temp.get(kw, [])} for kw in keywords_list]
+        def generate():
+            nonlocal mercari_temp, yahoo_temp
+            with ThreadPoolExecutor(max_workers=10) as pool:
+                mercari_futures = {pool.submit(search_mercari_kw, kw): kw for kw in keywords_list}
+                yahoo_futures = {pool.submit(search_yahoo_kw, kw): kw for kw in keywords_list}
+                all_futures = list(mercari_futures.keys()) + list(yahoo_futures.keys())
+                for f in as_completed(all_futures):
+                    kw = mercari_futures.get(f) or yahoo_futures.get(f)
+                    if f in mercari_futures:
+                        mercari_temp[kw] = f.result()
+                    else:
+                        yahoo_temp[kw] = f.result()
+                    if kw not in keywords_done and kw in mercari_temp and kw in yahoo_temp:
+                        keywords_done.add(kw)
+                        yield 'data: ' + json.dumps({
+                            'keyword': kw,
+                            'mercari_items': mercari_temp.get(kw, []),
+                            'yahoo_items': yahoo_temp.get(kw, [])
+                        }, ensure_ascii=False) + '\n\n'
+                for kw in keywords_list:
+                    if kw not in keywords_done:
+                        yield 'data: ' + json.dumps({
+                            'keyword': kw,
+                            'mercari_items': mercari_temp.get(kw, []),
+                            'yahoo_items': yahoo_temp.get(kw, [])
+                        }, ensure_ascii=False) + '\n\n'
+            yield 'data: ' + json.dumps({'complete': True, 'keywords': keywords_list}, ensure_ascii=False) + '\n\n'
 
-        return jsonify({
-            'keywords': keywords_list,
-            'mercari_results': mercari_results,
-            'yahoo_results': yahoo_results
-        })
+        return Response(stream_with_context(generate()), mimetype='text/event-stream')
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
