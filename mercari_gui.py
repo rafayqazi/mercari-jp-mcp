@@ -30,7 +30,7 @@ HTML_PAGE = u'''<!DOCTYPE html>
   body { background: #f0f2f5; display: flex; justify-content: center; min-height: 100vh; }
   .container { max-width: 1000px; width: 100%; padding: 24px 16px; }
   h1 { font-size: 24px; color: #ea352d; margin-bottom: 20px; display: flex; align-items: center; gap: 8px; }
-  h1::before { content: "\01F4F1"; font-size: 24px; }
+  h1::before { content: "📱"; font-size: 24px; }
   .card { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 16px; }
   .card h2 { font-size: 16px; color: #333; margin-bottom: 16px; }
   .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
@@ -444,6 +444,11 @@ HTML_PAGE = u'''<!DOCTYPE html>
           <label for="combinedMinReviews">Min Reviews</label>
           <input type="number" id="combinedMinReviews" placeholder="e.g. 50" min="0">
         </div>
+        <div class="form-group" style="flex:0;min-width:auto;display:flex;align-items:center;gap:6px;margin-top:18px;flex-direction:row;">
+          <input type="checkbox" id="combinedExcludeAuctions" style="width:16px;height:16px;cursor:pointer;">
+          <label for="combinedExcludeAuctions" style="margin:0;cursor:pointer;font-size:12px;white-space:nowrap;">Exclude Mercari Auctions</label>
+        </div>
+        <div style="width:1px;height:36px;background:#ddd;align-self:center;margin-top:18px;"></div>
         <div class="form-group" style="flex:1;min-width:100px;">
           <label for="combinedYahooStatus">Yahoo Status</label>
           <select id="combinedYahooStatus"><option value="live">Live Auctions</option><option value="sold">Sold / Ended</option></select>
@@ -476,6 +481,7 @@ HTML_PAGE = u'''<!DOCTYPE html>
   <div id="combinedResults">
     <div class="status"><div class="emoji">&#x1F50D;</div><p>Enter keywords and click Search Both</p></div>
   </div>
+</div>
 </div>
 <div class="modal-overlay" id="modalOverlay" onclick="closeModal(event)">
   <div class="modal" id="modalContent" onclick="event.stopPropagation()">
@@ -692,7 +698,8 @@ async function doBulkSearch() {
       status_filter: document.getElementById('bulkStatus').value,
       condition: document.getElementById('bulkCondition').value,
       min_reviews: parseInt(document.getElementById('bulkMinReviews').value) || '',
-      max_reviews: parseInt(document.getElementById('bulkMaxReviews').value) || ''
+      max_reviews: parseInt(document.getElementById('bulkMaxReviews').value) || '',
+      exclude_auctions: document.getElementById('bulkExcludeAuctions').checked ? '1' : ''
     }, function(data) {
       appendBulkResult(data.keyword, data.items);
       doneCount++;
@@ -1042,6 +1049,7 @@ async function doCombinedBulkSearch() {
       mercari_status: document.getElementById('combinedStatus').value,
       mercari_condition: document.getElementById('combinedCondition').value,
       mercari_min_reviews: parseInt(document.getElementById('combinedMinReviews').value) || 0,
+      mercari_exclude_auctions: document.getElementById('combinedExcludeAuctions').checked ? '1' : '',
       yahoo_status: document.getElementById('combinedYahooStatus').value,
       yahoo_condition: document.getElementById('combinedYahooCondition').value,
       yahoo_bin_filter: document.getElementById('combinedYahooBIN').value
@@ -1380,6 +1388,7 @@ def api_bulk_search():
         condition_filter = data.get('condition', '')
         min_reviews = int(data.get('min_reviews', 0)) if data.get('min_reviews') else None
         max_reviews = int(data.get('max_reviews', 0)) if data.get('max_reviews') else None
+        exclude_auctions = data.get('exclude_auctions', '') in ('1', 'true', True)
         COND_IDS = {'1': '新品、未使用', '2': '未使用に近い', '3': '目立った傷や汚れなし', '4': 'やや傷や汚れあり', '5': '傷や汚れあり', '6': '全体的に状態が悪い'}
         COND_EN = {
             '新品、未使用': 'NEW, UNUSED',
@@ -1399,6 +1408,8 @@ def api_bulk_search():
                     name = getattr(item, 'productName', None)
                     price = getattr(item, 'price', None)
                     if not name or price is None:
+                        continue
+                    if exclude_auctions and getattr(item, 'auction', None) is not None:
                         continue
                     item_status = getattr(item, 'status', '')
                     if status_filter == 'available' and item_status != 'ITEM_STATUS_ON_SALE':
@@ -1657,6 +1668,7 @@ def api_combined_bulk_search():
         yahoo_condition = data.get('yahoo_condition', '')
         yahoo_bin_filter = data.get('yahoo_bin_filter', 'all')
         mercari_min_reviews = int(data.get('mercari_min_reviews', 0)) or 0
+        mercari_exclude_auctions = data.get('mercari_exclude_auctions', '') in ('1', 'true', True)
 
         keywords_list = [k.strip() for k in keywords[:50] if k.strip()]
 
@@ -1678,6 +1690,8 @@ def api_combined_bulk_search():
                     name = getattr(item, 'productName', None)
                     price = getattr(item, 'price', None)
                     if not name or price is None:
+                        continue
+                    if mercari_exclude_auctions and getattr(item, 'auction', None) is not None:
                         continue
                     item_status = getattr(item, 'status', '')
                     if mercari_status == 'available' and item_status != 'ITEM_STATUS_ON_SALE':
