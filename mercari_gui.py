@@ -141,6 +141,18 @@ HTML_PAGE = u'''<!DOCTYPE html>
   .combined-grid .combined-col h3.mercari-header { border-bottom-color: #ea352d; }
   .combined-grid .combined-col h3.yahoo-header { border-bottom-color: #222; }
   .combined-keyword-title { font-size: 13px; font-weight: 600; color: #555; margin: 12px 0 8px; padding: 6px 10px; background: #f5f5f5; border-radius: 6px; }
+  .stock-card { display: flex; gap: 12px; padding: 12px 16px; background: white; border: 1px solid #eee; border-radius: 10px; align-items: center; margin-bottom: 8px; transition: box-shadow 0.2s; }
+  .stock-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.1); }
+  .stock-status { padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; white-space: nowrap; flex-shrink: 0; }
+  .stock-status.available { background: #e8f5e9; color: #2e7d32; }
+  .stock-status.sold { background: #fce4ec; color: #c62828; }
+  .stock-status.error { background: #fff3e0; color: #e65100; }
+  .stock-link-text { font-size: 12px; color: #888; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
+  .stock-platform { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px; flex-shrink: 0; }
+  .stock-platform.mercari { background: #fce4ec; color: #c62828; }
+  .stock-platform.yahoo { background: #e3f2fd; color: #1565c0; }
+  .stock-price { font-size: 15px; font-weight: 700; color: #333; white-space: nowrap; flex-shrink: 0; }
+  .stock-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 500; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   @media (max-width: 768px) { .combined-grid { flex-direction: column; } .combined-grid .combined-col { width: 100%; } }
   @media (max-width: 600px) { .form-row { grid-template-columns: 1fr; } }
 </style>
@@ -155,6 +167,7 @@ HTML_PAGE = u'''<!DOCTYPE html>
     <button class="tab-btn" data-tab="yahoo" onclick="switchTab('yahoo')">Yahoo Auctions</button>
     <button class="tab-btn" data-tab="yahooBulk" onclick="switchTab('yahooBulk')">Yahoo Bulk</button>
     <button class="tab-btn" data-tab="combinedBulk" onclick="switchTab('combinedBulk')">Mercari + Yahoo Bulk</button>
+    <button class="tab-btn" data-tab="stockCheck" onclick="switchTab('stockCheck')">Check Out Of Stock</button>
   </div>
   <div class="tab-content active" id="tabSimple">
   <div class="card">
@@ -481,6 +494,23 @@ HTML_PAGE = u'''<!DOCTYPE html>
   <div id="combinedResults">
     <div class="status"><div class="emoji">&#x1F50D;</div><p>Enter keywords and click Search Both</p></div>
   </div>
+</div>
+<div class="tab-content" id="tabStockCheck">
+  <div class="card">
+    <h2>Check Out Of Stock</h2>
+    <div class="bulk-area">
+      <textarea id="stockLinks" placeholder="Paste Yahoo / Mercari product links here, one per line&#10;e.g.&#10;https://auctions.yahoo.co.jp/jp/auction/1237842851&#10;https://jp.mercari.com/item/m37921031300"></textarea>
+      <button class="btn-search" id="stockBtn" onclick="doStockCheck()" style="margin-top:4px;">
+        <span class="spinner"></span>
+        <span class="btn-text">Check Stock</span>
+      </button>
+      <div class="bulk-keyword-count" id="stockCount"></div>
+    </div>
+  </div>
+  <div id="stockResults">
+    <div class="status"><div class="emoji">&#x1F50D;</div><p>Paste product links above and click Check Stock</p></div>
+  </div>
+  <button class="dl-btn" id="stockDlBtn" onclick="downloadStockCSV()" style="display:none;margin-top:8px;">Download CSV</button>
 </div>
 </div>
 <div class="modal-overlay" id="modalOverlay" onclick="closeModal(event)">
@@ -1132,6 +1162,100 @@ function appendCombinedResult(kw, mercariItems, yahooItems) {
 
   html += '</div></div></div></div>';
   groups.insertAdjacentHTML('beforeend', html);
+}
+
+// Stock Check
+document.getElementById('stockLinks').addEventListener('input', updateStockCount);
+
+function updateStockCount() {
+  const v = document.getElementById('stockLinks').value.trim();
+  const n = v ? v.split('\\n').filter(function(l){ return l.trim(); }).length : 0;
+  document.getElementById('stockCount').textContent = n ? n+' link(s) loaded' : '';
+}
+
+function showModalError(msg) {
+  const overlay = document.getElementById('modalOverlay');
+  const body = document.getElementById('modalBody');
+  body.innerHTML = '<div style="text-align:center;padding:16px;">'
+    + '<div style="font-size:48px;margin-bottom:12px;">&#x26A0;</div>'
+    + '<h3 style="color:#d42c25;margin-bottom:12px;font-size:16px;">Error</h3>'
+    + '<p style="color:#555;font-size:14px;line-height:1.6;white-space:pre-wrap;">'+escapeHtml(msg)+'</p>'
+    + '</div>';
+  overlay.classList.add('active');
+}
+
+async function doStockCheck() {
+  const btn = document.getElementById('stockBtn');
+  const errDiv = document.getElementById('errorMsg');
+  errDiv.style.display = 'none';
+  const text = document.getElementById('stockLinks').value.trim();
+  if (!text) { showModalError('Paste product links first'); return; }
+  const links = text.split('\\n').map(function(l){ return l.trim(); }).filter(function(l){ return l; });
+  if (!links.length) { showModalError('No valid links found'); return; }
+  if (links.length > 200) { showModalError('Maximum 200 links allowed'); return; }
+  btn.classList.add('loading'); btn.disabled = true;
+  const total = links.length;
+  const container = document.getElementById('stockResults');
+  container.innerHTML = '<div class="count-badge streaming">Checking... 0/'+total+'</div><div id="stockResultsList"></div>';
+  window._stockCSV = [];
+  window._stockErrors = [];
+  let doneCount = 0;
+  try {
+    await streamBulkSearch('/api/check-stock', { links: links }, function(data) {
+      appendStockResult(data);
+      doneCount++;
+      const badge = container.querySelector('.count-badge');
+      if (badge) badge.innerHTML = 'Checking... '+doneCount+'/'+total;
+    }, function() {
+      const badge = container.querySelector('.count-badge');
+      if (badge) badge.innerHTML = 'Results for <strong>'+doneCount+'</strong> item(s)';
+      document.getElementById('stockDlBtn').style.display = doneCount ? 'inline-block' : 'none';
+      if (window._stockErrors.length) {
+        showModalError('Completed with ' + window._stockErrors.length + ' error(s):\\n\\n' + window._stockErrors.join('\\n'));
+      }
+    });
+  } catch(e) { showModalError(e.message); }
+  finally { btn.classList.remove('loading'); btn.disabled = false; }
+}
+
+function appendStockResult(data) {
+  const list = document.getElementById('stockResultsList');
+  if (!list) return;
+  if (data.complete) return;
+  if (data.error) {
+    const linkShort = data.link ? (data.link.length > 60 ? data.link.slice(0, 60) + '...' : data.link) : 'Unknown';
+    window._stockErrors.push(linkShort + ' -> ' + data.error);
+    list.insertAdjacentHTML('beforeend', '<div class="stock-card">'
+      + '<span class="stock-platform '+(data.platform || '')+'">'+(data.platform || '?').toUpperCase()+'</span>'
+      + '<span class="stock-link-text">'+escapeHtml(data.link)+'</span>'
+      + '<span class="stock-status error">Error: '+escapeHtml(data.error)+'</span>'
+      + '</div>');
+    return;
+  }
+  const statusClass = data.available ? 'available' : 'sold';
+  const name = data.name || 'Unknown item';
+  const priceStr = data.price ? '&yen;'+Number(data.price).toLocaleString() : '';
+  const statusLabel = data.available_text || 'Unknown';
+  list.insertAdjacentHTML('beforeend', '<div class="stock-card">'
+    + '<span class="stock-platform '+data.platform+'">'+data.platform.toUpperCase()+'</span>'
+    + '<span class="stock-name" title="'+escapeHtml(data.status||'')+'">'+escapeHtml(name)+'</span>'
+    + (priceStr ? '<span class="stock-price">'+priceStr+'</span>' : '')
+    + '<span class="stock-status '+statusClass+'">'+statusLabel+'</span>'
+    + '<a class="result-link" href="'+escapeHtml(data.link)+'" target="_blank" rel="noopener" style="font-size:12px;">View</a>'
+    + '</div>');
+  window._stockCSV.push(data);
+}
+
+function downloadStockCSV() {
+  const data = window._stockCSV || [];
+  if (!data.length) return;
+  let csv = '\uFEFFLink,Platform,ID,Name,Price JPY,Status,Available\\n';
+  for (const r of data) {
+    if (r.complete) continue;
+    csv += '"'+(r.link||'').replace(/"/g,'""')+'","'+(r.platform||'')+'","'+(r.id||'')+'","'+(r.name||'').replace(/"/g,'""')+'",'+(r.price||'')+',"'+escapeHtml(r.status||'')+'","'+(r.available_text||'')+'"\\n';
+  }
+  const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'stock_check_results.csv'; a.click();
 }
 
 // Event delegation for description buttons
@@ -1819,6 +1943,247 @@ def api_combined_bulk_search():
                             'yahoo_items': yahoo_temp.get(kw, [])
                         }, ensure_ascii=False) + '\n\n'
             yield 'data: ' + json.dumps({'complete': True, 'keywords': keywords_list}, ensure_ascii=False) + '\n\n'
+
+        return Response(stream_with_context(generate()), mimetype='text/event-stream')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/check-stock', methods=['POST'])
+def api_check_stock():
+    try:
+        data = request.get_json()
+        if not data or 'links' not in data:
+            return jsonify({'error': 'Links required'}), 400
+        links = data['links']
+        if not isinstance(links, list) or not links:
+            return jsonify({'error': 'Links must be a non-empty array'}), 400
+
+        links = [l.strip() for l in links[:200] if l.strip()]
+        import re
+
+        def parse_link(link):
+            yahoo_match = re.search(r'auctions\.yahoo\.co\.jp/(?:jp/)?auction/([a-zA-Z0-9_]+)', link)
+            if yahoo_match:
+                return 'yahoo', yahoo_match.group(1)
+            yahoo_match2 = re.search(r'page\.auctions\.yahoo\.co\.jp/auction/([a-zA-Z0-9_]+)', link)
+            if yahoo_match2:
+                return 'yahoo', yahoo_match2.group(1)
+            paypay_match = re.search(r'paypayfleamarket\.yahoo\.co\.jp/item/([a-zA-Z0-9_]+)', link)
+            if paypay_match:
+                return 'paypay', paypay_match.group(1)
+            mercari_match = re.search(r'(?:jp\.)?mercari\.com/item/([a-zA-Z0-9_]+)', link)
+            if mercari_match:
+                return 'mercari', mercari_match.group(1)
+            netmall_match = re.search(r'netmall\.hardoff\.co\.jp/product/(\d+)', link)
+            if netmall_match:
+                return 'netmall', netmall_match.group(1)
+            rakuten_match = re.search(r'item\.rakuten\.co\.jp/([^/]+)/([a-zA-Z0-9_-]+)', link)
+            if rakuten_match:
+                return 'rakuten', rakuten_match.group(1) + '/' + rakuten_match.group(2)
+            return None, None
+
+        def fetch_paypay_item(item_id):
+            url = 'https://paypayfleamarket.yahoo.co.jp/item/' + item_id
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml',
+                'Accept-Language': 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7',
+            }
+            resp = http_requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            html = resp.text
+            nd_match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+            if not nd_match:
+                title_match2 = re.search(r'<title[^>]*>(.*?)</title>', html)
+                title = title_match2.group(1) if title_match2 else ''
+                return {'title': title, 'status': '', 'price': 0}
+            raw = nd_match.group(1)
+            raw_clean = re.sub(r'[\x00-\x1f]', '', raw)
+            try:
+                import json
+                parsed = json.loads(raw_clean)
+                init = parsed.get('props', {}).get('initialState', {})
+                item_data = init.get('itemsState', {}).get('items', {}).get('item', {})
+                status = item_data.get('status', '')
+                title = item_data.get('title', '')
+                price = item_data.get('price', 0)
+                return {'title': title, 'status': status, 'price': price, 'is_purchased': False}
+            except Exception:
+                pass
+            status_m = re.search(r'"status"\s*:\s*"([^"]+)"', raw)
+            title_m = re.search(r'<title[^>]*>(.*?)</title>', html)
+            price_m = re.search(r'"price"\s*:\s*(\d+)', raw)
+            return {
+                'title': title_m.group(1) if title_m else '',
+                'status': status_m.group(1) if status_m else '',
+                'price': int(price_m.group(1)) if price_m else 0,
+                'is_purchased': False
+            }
+
+        def fetch_netmall_item(item_id):
+            url = 'https://netmall.hardoff.co.jp/product/' + item_id + '/'
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml',
+                'Accept-Language': 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7',
+            }
+            try:
+                resp = http_requests.get(url, headers=headers, timeout=15)
+            except http_requests.exceptions.HTTPError as e:
+                if e.response is not None and e.response.status_code == 404:
+                    return {'title': '', 'availability': 'sold_out', 'price': 0, 'status_code': 404}
+                raise
+            if resp.status_code == 404:
+                return {'title': '', 'availability': 'sold_out', 'price': 0, 'status_code': 404}
+            html = resp.text
+            ld_matches = re.findall(r'<script type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL)
+            availability = 'unknown'
+            price = 0
+            for raw in ld_matches:
+                try:
+                    import json
+                    parsed = json.loads(raw)
+                    if parsed.get('@type') == 'Product':
+                        offers = parsed.get('offers', {})
+                        availability = offers.get('availability', '')
+                        price_str = offers.get('price', '0')
+                        price = int(float(price_str)) if price_str else 0
+                except Exception:
+                    pass
+            title_m = re.search(r'<title[^>]*>(.*?)</title>', html)
+            raw_title = title_m.group(1) if title_m else ''
+            title = re.sub(r'\|【ハードオフ公式通販】オフモール\|.*$', '', raw_title)
+            return {'title': title, 'availability': availability, 'price': price}
+
+        def fetch_rakuten_item(item_id):
+            shop_item = item_id
+            url = 'https://item.rakuten.co.jp/' + shop_item + '/'
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml',
+                'Accept-Language': 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7',
+            }
+            resp = http_requests.get(url, headers=headers, timeout=15)
+            resp.encoding = 'EUC-JP'
+            html = resp.text
+            if len(html) < 100 and 'Reference' in html:
+                return {'title': '', 'availability': 'unknown', 'price': 0, 'status_code': 403, 'error': 'Rakuten blocked the request (Akamai)'}
+            title_m = re.search(r'<title[^>]*>(.*?)</title>', html)
+            title = ''
+            if title_m:
+                raw = title_m.group(1)
+                title = re.sub(r'^【楽天市場】', '', raw)
+                title = re.sub(r'｜.*$', '', title)
+            has_soldout_popup = 'irc="SoldOutPopup"' in html
+            availability_m = re.search(r'itemprop="availability"\s+content="([^"]+)"', html)
+            availability = ''
+            if availability_m:
+                availability = availability_m.group(1)
+            is_available = (not has_soldout_popup) and ('InStock' in availability or 'instock' in availability.lower())
+            price_m = re.search(r'itemprop="price"\s+content="(\d+)"', html)
+            price = int(price_m.group(1)) if price_m else 0
+            return {'title': title, 'availability': availability, 'price': price, 'soldout_popup': has_soldout_popup}
+
+        def check_link(link):
+            platform, item_id = parse_link(link)
+            if not platform:
+                return {'link': link, 'platform': 'unknown', 'error': 'Could not parse URL'}
+
+            try:
+                if platform == 'paypay':
+                    detail = fetch_paypay_item(item_id)
+                    status = detail.get('status', '') or ''
+                    is_purchased = detail.get('is_purchased', False)
+                    is_available = status.upper() == 'OPEN' and not is_purchased
+                    return {
+                        'link': link,
+                        'platform': 'paypay',
+                        'id': item_id,
+                        'name': detail.get('title', ''),
+                        'price': detail.get('price', 0),
+                        'status': status,
+                        'available': is_available,
+                        'available_text': 'In Stock' if is_available else 'Out of Stock',
+                        'url': link
+                    }
+                elif platform == 'mercari':
+                    item = getItemInfo(item_id)
+                    status = getattr(item, 'status', '') or ''
+                    name = getattr(item, 'name', '')
+                    price = getattr(item, 'price', 0)
+                    sold_statuses = ('item_status_sold_out', 'sold_out', 'item_status_stop', 'stop', 'item_status_cancel', 'cancel', 'item_status_admin_cancel')
+                    is_available = status.lower() not in sold_statuses
+                    return {
+                        'link': link,
+                        'platform': 'mercari',
+                        'id': item_id,
+                        'name': name,
+                        'price': price,
+                        'status': status,
+                        'available': is_available,
+                        'available_text': 'In Stock' if is_available else 'Out of Stock',
+                        'url': link
+                    }
+                elif platform == 'yahoo':
+                    detail = get_item_detail(item_id)
+                    status = detail.get('status', '') or ''
+                    is_available = status.lower() not in ('sold', 'closed', 'ended')
+                    return {
+                        'link': link,
+                        'platform': 'yahoo',
+                        'id': item_id,
+                        'name': detail.get('title', ''),
+                        'price': detail.get('price', 0),
+                        'status': status,
+                        'available': is_available,
+                        'available_text': 'In Stock' if is_available else 'Out of Stock',
+                        'url': link
+                    }
+                elif platform == 'netmall':
+                    detail = fetch_netmall_item(item_id)
+                    status_code = detail.get('status_code', 200)
+                    availability = detail.get('availability', '')
+                    is_sold_page = status_code == 404
+                    is_out_of_stock = availability in ('https://schema.org/OutOfStock', 'https://schema.org/Discontinued', 'SoldOut')
+                    is_available = not is_sold_page and not is_out_of_stock
+                    return {
+                        'link': link,
+                        'platform': 'netmall',
+                        'id': item_id,
+                        'name': detail.get('title', ''),
+                        'price': detail.get('price', 0),
+                        'status': availability,
+                        'available': is_available,
+                        'available_text': 'In Stock' if is_available else 'Out of Stock',
+                        'url': link
+                    }
+                elif platform == 'rakuten':
+                    detail = fetch_rakuten_item(item_id)
+                    if detail.get('error'):
+                        return {'link': link, 'platform': 'rakuten', 'id': item_id, 'error': detail['error']}
+                    is_available = detail.get('availability') == 'http://schema.org/InStock' and not detail.get('soldout_popup', False)
+                    return {
+                        'link': link,
+                        'platform': 'rakuten',
+                        'id': item_id,
+                        'name': detail.get('title', ''),
+                        'price': detail.get('price', 0),
+                        'status': detail.get('availability', ''),
+                        'available': is_available,
+                        'available_text': 'In Stock' if is_available else 'Out of Stock',
+                        'url': link
+                    }
+            except Exception as e:
+                return {'link': link, 'platform': platform, 'id': item_id, 'error': str(e)}
+
+        def generate():
+            with ThreadPoolExecutor(max_workers=10) as pool:
+                futures = {pool.submit(check_link, link): link for link in links}
+                for f in as_completed(futures):
+                    result = f.result()
+                    yield 'data: ' + json.dumps(result, ensure_ascii=False) + '\n\n'
+            yield 'data: ' + json.dumps({'complete': True, 'total': len(links)}, ensure_ascii=False) + '\n\n'
 
         return Response(stream_with_context(generate()), mimetype='text/event-stream')
     except Exception as e:
