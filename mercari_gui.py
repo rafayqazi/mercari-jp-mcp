@@ -8,7 +8,7 @@ import openpyxl
 from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'temp_download', 'mercari-2.2.1'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'temp_download'))
-from mercari import search, getItemInfo, MercariSort, MercariOrder, MercariSearchStatus
+from mercari import search, getItemInfo, getShopProductInfo, ShopProductInfo, MercariSort, MercariOrder, MercariSearchStatus
 from yahoo_auctions import search_yahoo, get_item_detail, parse_search_results, build_search_url
 
 app = Flask(__name__)
@@ -151,8 +151,11 @@ HTML_PAGE = u'''<!DOCTYPE html>
   .stock-platform { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px; flex-shrink: 0; }
   .stock-platform.mercari { background: #fce4ec; color: #c62828; }
   .stock-platform.yahoo { background: #e3f2fd; color: #1565c0; }
+  .stock-platform.yahoo_shopping { background: #fff3e0; color: #e65100; }
   .stock-price { font-size: 15px; font-weight: 700; color: #333; white-space: nowrap; flex-shrink: 0; }
   .stock-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 500; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stock-keyword { font-size: 11px; font-weight: 600; color: #555; background: #f0f0f0; padding: 2px 8px; border-radius: 4px; white-space: nowrap; flex-shrink: 0; max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
+  .stock-sno { font-size: 12px; font-weight: 700; color: #999; min-width: 28px; text-align: center; flex-shrink: 0; }
   @media (max-width: 768px) { .combined-grid { flex-direction: column; } .combined-grid .combined-col { width: 100%; } }
   @media (max-width: 600px) { .form-row { grid-template-columns: 1fr; } }
 </style>
@@ -499,7 +502,16 @@ HTML_PAGE = u'''<!DOCTYPE html>
   <div class="card">
     <h2>Check Out Of Stock</h2>
     <div class="bulk-area">
-      <textarea id="stockLinks" placeholder="Paste Yahoo / Mercari product links here, one per line&#10;e.g.&#10;https://auctions.yahoo.co.jp/jp/auction/1237842851&#10;https://jp.mercari.com/item/m37921031300"></textarea>
+      <div class="form-row">
+        <div class="form-group">
+          <label for="stockKeywords">Keywords (one per line, paired by index)</label>
+          <textarea id="stockKeywords" placeholder="Keyword for each link&#10;e.g.&#10;iPhone 15 Pro&#10;Canon PowerShot&#10;PS5" style="min-height:120px;"></textarea>
+        </div>
+        <div class="form-group">
+          <label for="stockLinks">Product Links (one per line)</label>
+          <textarea id="stockLinks" placeholder="Paste Yahoo / Mercari product links here&#10;e.g.&#10;https://auctions.yahoo.co.jp/jp/auction/1237842851&#10;https://jp.mercari.com/item/m37921031300" style="min-height:120px;"></textarea>
+        </div>
+      </div>
       <button class="btn-search" id="stockBtn" onclick="doStockCheck()" style="margin-top:4px;">
         <span class="spinner"></span>
         <span class="btn-text">Check Stock</span>
@@ -508,7 +520,7 @@ HTML_PAGE = u'''<!DOCTYPE html>
     </div>
   </div>
   <div id="stockResults">
-    <div class="status"><div class="emoji">&#x1F50D;</div><p>Paste product links above and click Check Stock</p></div>
+    <div class="status"><div class="emoji">&#x1F50D;</div><p>Enter keywords &amp; product links and click Check Stock</p></div>
   </div>
   <button class="dl-btn" id="stockDlBtn" onclick="downloadStockCSV()" style="display:none;margin-top:8px;">Download CSV</button>
 </div>
@@ -1188,9 +1200,11 @@ async function doStockCheck() {
   const btn = document.getElementById('stockBtn');
   const errDiv = document.getElementById('errorMsg');
   errDiv.style.display = 'none';
-  const text = document.getElementById('stockLinks').value.trim();
-  if (!text) { showModalError('Paste product links first'); return; }
-  const links = text.split('\\n').map(function(l){ return l.trim(); }).filter(function(l){ return l; });
+  const kwText = document.getElementById('stockKeywords').value.trim();
+  const linkText = document.getElementById('stockLinks').value.trim();
+  if (!linkText) { showModalError('Paste product links first'); return; }
+  const links = linkText.split('\\n').map(function(l){ return l.trim(); }).filter(function(l){ return l; });
+  const keywords = kwText ? kwText.split('\\n').map(function(l){ return l.trim(); }).filter(function(l){ return l; }) : [];
   if (!links.length) { showModalError('No valid links found'); return; }
   if (links.length > 200) { showModalError('Maximum 200 links allowed'); return; }
   btn.classList.add('loading'); btn.disabled = true;
@@ -1199,9 +1213,10 @@ async function doStockCheck() {
   container.innerHTML = '<div class="count-badge streaming">Checking... 0/'+total+'</div><div id="stockResultsList"></div>';
   window._stockCSV = [];
   window._stockErrors = [];
+  _stockSno = 0;
   let doneCount = 0;
   try {
-    await streamBulkSearch('/api/check-stock', { links: links }, function(data) {
+    await streamBulkSearch('/api/check-stock', { links: links, keywords: keywords }, function(data) {
       appendStockResult(data);
       doneCount++;
       const badge = container.querySelector('.count-badge');
@@ -1218,25 +1233,32 @@ async function doStockCheck() {
   finally { btn.classList.remove('loading'); btn.disabled = false; }
 }
 
+let _stockSno = 0;
 function appendStockResult(data) {
   const list = document.getElementById('stockResultsList');
   if (!list) return;
   if (data.complete) return;
+  _stockSno++;
   if (data.error) {
     const linkShort = data.link ? (data.link.length > 60 ? data.link.slice(0, 60) + '...' : data.link) : 'Unknown';
-    window._stockErrors.push(linkShort + ' -> ' + data.error);
+    window._stockErrors.push(_stockSno + '. ' + (data.keyword||'') + ' -> ' + linkShort + ' -> ' + data.error);
     list.insertAdjacentHTML('beforeend', '<div class="stock-card">'
+      + '<span class="stock-sno">'+_stockSno+'</span>'
+      + (data.keyword ? '<span class="stock-keyword" title="Keyword">'+escapeHtml(data.keyword)+'</span>' : '')
       + '<span class="stock-platform '+(data.platform || '')+'">'+(data.platform || '?').toUpperCase()+'</span>'
       + '<span class="stock-link-text">'+escapeHtml(data.link)+'</span>'
       + '<span class="stock-status error">Error: '+escapeHtml(data.error)+'</span>'
       + '</div>');
     return;
   }
+  data.s_no = _stockSno;
   const statusClass = data.available ? 'available' : 'sold';
   const name = data.name || 'Unknown item';
   const priceStr = data.price ? '&yen;'+Number(data.price).toLocaleString() : '';
   const statusLabel = data.available_text || 'Unknown';
   list.insertAdjacentHTML('beforeend', '<div class="stock-card">'
+    + '<span class="stock-sno">'+_stockSno+'</span>'
+    + (data.keyword ? '<span class="stock-keyword" title="Keyword">'+escapeHtml(data.keyword)+'</span>' : '')
     + '<span class="stock-platform '+data.platform+'">'+data.platform.toUpperCase()+'</span>'
     + '<span class="stock-name" title="'+escapeHtml(data.status||'')+'">'+escapeHtml(name)+'</span>'
     + (priceStr ? '<span class="stock-price">'+priceStr+'</span>' : '')
@@ -1249,10 +1271,10 @@ function appendStockResult(data) {
 function downloadStockCSV() {
   const data = window._stockCSV || [];
   if (!data.length) return;
-  let csv = '\uFEFFLink,Platform,ID,Name,Price JPY,Status,Available\\n';
+  let csv = '\uFEFFS.No,Keyword,Link,Platform,ID,Name,Price JPY,Status,Available\\n';
   for (const r of data) {
     if (r.complete) continue;
-    csv += '"'+(r.link||'').replace(/"/g,'""')+'","'+(r.platform||'')+'","'+(r.id||'')+'","'+(r.name||'').replace(/"/g,'""')+'",'+(r.price||'')+',"'+escapeHtml(r.status||'')+'","'+(r.available_text||'')+'"\\n';
+    csv += ''+(r.s_no||'')+',"'+(r.keyword||'').replace(/"/g,'""')+'","'+(r.link||'').replace(/"/g,'""')+'","'+(r.platform||'')+'","'+(r.id||'')+'","'+(r.name||'').replace(/"/g,'""')+'",'+(r.price||'')+',"'+escapeHtml(r.status||'')+'","'+(r.available_text||'')+'"\\n';
   }
   const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'stock_check_results.csv'; a.click();
@@ -1959,7 +1981,12 @@ def api_check_stock():
         if not isinstance(links, list) or not links:
             return jsonify({'error': 'Links must be a non-empty array'}), 400
 
+        raw_keywords = data.get('keywords', [])
+        if not isinstance(raw_keywords, list):
+            raw_keywords = []
+
         links = [l.strip() for l in links[:200] if l.strip()]
+        keywords = [k.strip() for k in raw_keywords[:200] if k.strip()]
         import re
 
         def parse_link(link):
@@ -1972,6 +1999,9 @@ def api_check_stock():
             paypay_match = re.search(r'paypayfleamarket\.yahoo\.co\.jp/item/([a-zA-Z0-9_]+)', link)
             if paypay_match:
                 return 'paypay', paypay_match.group(1)
+            mercari_shop_match = re.search(r'(?:jp\.)?mercari\.com/shops/product/([a-zA-Z0-9_]+)', link)
+            if mercari_shop_match:
+                return 'mercari_shop', mercari_shop_match.group(1)
             mercari_match = re.search(r'(?:jp\.)?mercari\.com/item/([a-zA-Z0-9_]+)', link)
             if mercari_match:
                 return 'mercari', mercari_match.group(1)
@@ -1981,6 +2011,9 @@ def api_check_stock():
             rakuten_match = re.search(r'item\.rakuten\.co\.jp/([^/]+)/([a-zA-Z0-9_-]+)', link)
             if rakuten_match:
                 return 'rakuten', rakuten_match.group(1) + '/' + rakuten_match.group(2)
+            yahoo_shopping_match = re.search(r'store\.shopping\.yahoo\.co\.jp/([^/]+)/([a-zA-Z0-9_-]+)\.html', link)
+            if yahoo_shopping_match:
+                return 'yahoo_shopping', yahoo_shopping_match.group(1) + '/' + yahoo_shopping_match.group(2)
             return None, None
 
         def fetch_paypay_item(item_id):
@@ -2085,10 +2118,71 @@ def api_check_stock():
             price = int(price_m.group(1)) if price_m else 0
             return {'title': title, 'availability': availability, 'price': price, 'soldout_popup': has_soldout_popup}
 
-        def check_link(link):
+        def fetch_mercari_shop_item(item_id):
+            try:
+                info = getShopProductInfo(item_id)
+                return {'title': info.name, 'price': info.price, 'status': info.status}
+            except Exception as e:
+                print(f'[shop api error] {e}', file=sys.stderr)
+                return {'title': '', 'price': 0, 'status': 'on_sale'}
+
+        def fetch_yahoo_shopping_item(item_id):
+            url = 'https://store.shopping.yahoo.co.jp/' + item_id + '.html'
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml',
+                'Accept-Language': 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7',
+            }
+            try:
+                resp = http_requests.get(url, headers=headers, timeout=15)
+            except http_requests.exceptions.HTTPError as e:
+                if e.response is not None and e.response.status_code == 404:
+                    return {'title': '', 'price': 0, 'available': False}
+                raise
+            if resp.status_code == 404:
+                return {'title': '', 'price': 0, 'available': False}
+            html = resp.text
+            nd_match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+            if nd_match:
+                try:
+                    nd = json.loads(nd_match.group(1))
+                    page_props = nd.get('props', {}).get('pageProps', {})
+                    item = page_props.get('item', {})
+                    stock = item.get('stock', {})
+                    is_available = stock.get('isAvailable', False)
+                    title = item.get('name', '')
+                    price = item.get('applicablePrice', 0)
+                    return {'title': title, 'price': price, 'available': is_available}
+                except Exception:
+                    pass
+            ld_matches = re.findall(r'<script type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL)
+            for raw in ld_matches:
+                try:
+                    parsed = json.loads(raw)
+                    if parsed.get('@type') == 'Product':
+                        offers = parsed.get('offers', {})
+                        avail = offers.get('availability', '')
+                        is_available = 'InStock' in avail
+                        title_m = re.search(r'<title[^>]*>(.*?)</title>', html)
+                        title = re.sub(r'\s*-\s*通販\s*-\s*Yahoo!ショッピング\s*$', '', title_m.group(1)) if title_m else ''
+                        price_str = offers.get('price', '0')
+                        price = int(float(price_str)) if price_str else 0
+                        return {'title': title, 'price': price, 'available': is_available}
+                except Exception:
+                    pass
+            title_m = re.search(r'<title[^>]*>(.*?)</title>', html)
+            title = re.sub(r'\s*-\s*通販\s*-\s*Yahoo!ショッピング\s*$', '', title_m.group(1)) if title_m else ''
+            has_sold = '売り切れ' in html or '在庫なし' in html or 'sold out' in html.lower()
+            return {'title': title, 'price': 0, 'available': not has_sold}
+
+        def check_link(link, keyword=''):
+            base_result = {'link': link, 'keyword': keyword}
             platform, item_id = parse_link(link)
             if not platform:
-                return {'link': link, 'platform': 'unknown', 'error': 'Could not parse URL'}
+                return {**base_result, 'platform': 'unknown', 'error': 'Could not parse URL'}
+
+            base_result['platform'] = platform
+            base_result['id'] = item_id
 
             try:
                 if platform == 'paypay':
@@ -2096,10 +2190,7 @@ def api_check_stock():
                     status = detail.get('status', '') or ''
                     is_purchased = detail.get('is_purchased', False)
                     is_available = status.upper() == 'OPEN' and not is_purchased
-                    return {
-                        'link': link,
-                        'platform': 'paypay',
-                        'id': item_id,
+                    return {**base_result,
                         'name': detail.get('title', ''),
                         'price': detail.get('price', 0),
                         'status': status,
@@ -2114,13 +2205,21 @@ def api_check_stock():
                     price = getattr(item, 'price', 0)
                     sold_statuses = ('item_status_sold_out', 'sold_out', 'item_status_stop', 'stop', 'item_status_cancel', 'cancel', 'item_status_admin_cancel')
                     is_available = status.lower() not in sold_statuses
-                    return {
-                        'link': link,
-                        'platform': 'mercari',
-                        'id': item_id,
+                    return {**base_result,
                         'name': name,
                         'price': price,
                         'status': status,
+                        'available': is_available,
+                        'available_text': 'In Stock' if is_available else 'Out of Stock',
+                        'url': link
+                    }
+                elif platform == 'mercari_shop':
+                    detail = fetch_mercari_shop_item(item_id)
+                    is_available = detail.get('status') == 'on_sale'
+                    return {**base_result,
+                        'name': detail.get('title', ''),
+                        'price': detail.get('price', 0),
+                        'status': detail.get('status', ''),
                         'available': is_available,
                         'available_text': 'In Stock' if is_available else 'Out of Stock',
                         'url': link
@@ -2129,10 +2228,7 @@ def api_check_stock():
                     detail = get_item_detail(item_id)
                     status = detail.get('status', '') or ''
                     is_available = status.lower() not in ('sold', 'closed', 'ended')
-                    return {
-                        'link': link,
-                        'platform': 'yahoo',
-                        'id': item_id,
+                    return {**base_result,
                         'name': detail.get('title', ''),
                         'price': detail.get('price', 0),
                         'status': status,
@@ -2147,10 +2243,7 @@ def api_check_stock():
                     is_sold_page = status_code == 404
                     is_out_of_stock = availability in ('https://schema.org/OutOfStock', 'https://schema.org/Discontinued', 'SoldOut')
                     is_available = not is_sold_page and not is_out_of_stock
-                    return {
-                        'link': link,
-                        'platform': 'netmall',
-                        'id': item_id,
+                    return {**base_result,
                         'name': detail.get('title', ''),
                         'price': detail.get('price', 0),
                         'status': availability,
@@ -2161,12 +2254,9 @@ def api_check_stock():
                 elif platform == 'rakuten':
                     detail = fetch_rakuten_item(item_id)
                     if detail.get('error'):
-                        return {'link': link, 'platform': 'rakuten', 'id': item_id, 'error': detail['error']}
+                        return {**base_result, 'error': detail['error']}
                     is_available = detail.get('availability') == 'http://schema.org/InStock' and not detail.get('soldout_popup', False)
-                    return {
-                        'link': link,
-                        'platform': 'rakuten',
-                        'id': item_id,
+                    return {**base_result,
                         'name': detail.get('title', ''),
                         'price': detail.get('price', 0),
                         'status': detail.get('availability', ''),
@@ -2174,15 +2264,39 @@ def api_check_stock():
                         'available_text': 'In Stock' if is_available else 'Out of Stock',
                         'url': link
                     }
+                elif platform == 'yahoo_shopping':
+                    detail = fetch_yahoo_shopping_item(item_id)
+                    is_available = detail.get('available', False)
+                    return {**base_result,
+                        'name': detail.get('title', ''),
+                        'price': detail.get('price', 0),
+                        'status': 'on_sale' if is_available else 'sold_out',
+                        'available': is_available,
+                        'available_text': 'In Stock' if is_available else 'Out of Stock',
+                        'url': link
+                    }
             except Exception as e:
-                return {'link': link, 'platform': platform, 'id': item_id, 'error': str(e)}
+                return {**base_result, 'error': str(e)}
 
         def generate():
-            with ThreadPoolExecutor(max_workers=10) as pool:
-                futures = {pool.submit(check_link, link): link for link in links}
-                for f in as_completed(futures):
-                    result = f.result()
-                    yield 'data: ' + json.dumps(result, ensure_ascii=False) + '\n\n'
+            from concurrent.futures import as_completed, TimeoutError as _TimeoutError
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                fut_to_key = {}
+                for idx, link in enumerate(links):
+                    kw = keywords[idx] if idx < len(keywords) else ''
+                    fut = pool.submit(check_link, link, kw)
+                    fut_to_key[fut] = kw
+                try:
+                    for f in as_completed(fut_to_key, timeout=300):
+                        try:
+                            result = f.result(timeout=5)
+                        except Exception as exc:
+                            result = {'link': '', 'keyword': fut_to_key.get(f, ''), 'error': str(exc)}
+                        yield 'data: ' + json.dumps(result, ensure_ascii=False) + '\n\n'
+                except _TimeoutError:
+                    for f in list(fut_to_key):
+                        if not f.done():
+                            f.cancel()
             yield 'data: ' + json.dumps({'complete': True, 'total': len(links)}, ensure_ascii=False) + '\n\n'
 
         return Response(stream_with_context(generate()), mimetype='text/event-stream')

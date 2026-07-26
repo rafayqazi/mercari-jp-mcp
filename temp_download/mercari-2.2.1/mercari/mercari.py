@@ -8,6 +8,7 @@ rootURL = "https://api.mercari.jp/"
 rootProductURL = "https://jp.mercari.com/item/"
 searchURL = "{}v2/entities:search".format(rootURL)
 itemInfoURL = "{}items/get".format(rootURL) # idk why not v2
+shopProductURL = "{}v1/marketplaces/shops/products/".format(rootURL)
 
 
 class MercariSearchStatus:
@@ -116,10 +117,11 @@ def fetch(url, data, parser, method="POST"):
     
     serializedData = json.dumps(data, ensure_ascii=False).encode('utf-8')
 
+    req_timeout = 30
     if method == "POST":
-        r = requests.post(url, headers=headers, data=serializedData)
+        r = requests.post(url, headers=headers, data=serializedData, timeout=req_timeout)
     else:
-        r = requests.get(url, headers=headers, params=convert_booleans(data))    
+        r = requests.get(url, headers=headers, params=convert_booleans(data), timeout=req_timeout)
 
     r.raise_for_status()
 
@@ -191,4 +193,21 @@ def getItemInfo(itemID, country_code="US"):
     }
 
     item = fetch(itemInfoURL, data, parseItemInfo, method="GET")
+    return item
+
+class ShopProductInfo:
+    def __init__(self, data):
+        self.name = data.get('displayName', '')
+        self.price = int(data.get('price', 0))
+        tags = data.get('productTags', [])
+        self.status = 'sold_out' if 'sold_out' in tags else 'on_sale'
+        self.thumbnail = data.get('thumbnail', '')
+
+def parseShopProductInfo(resp):
+    return ShopProductInfo(resp)
+
+def getShopProductInfo(itemID):
+    url = shopProductURL + itemID
+    data = {"id": itemID, "country_code": "JP"}
+    item = fetch(url, data, parseShopProductInfo, method="GET")
     return item

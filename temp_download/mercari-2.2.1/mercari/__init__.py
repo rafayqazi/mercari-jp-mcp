@@ -1,2 +1,2 @@
-from .mercari import search, MercariItemStatus, MercariOrder, MercariSearchStatus, MercariSort, getItemInfo
+from .mercari import search, MercariItemStatus, MercariOrder, MercariSearchStatus, MercariSort, getItemInfo, getShopProductInfo, ShopProductInfo
 
