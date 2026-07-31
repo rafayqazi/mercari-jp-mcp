@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'temp_download', 'mer
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'temp_download'))
 from mercari import search, getItemInfo, getShopProductInfo, ShopProductInfo, MercariSort, MercariOrder, MercariSearchStatus
 from yahoo_auctions import search_yahoo, get_item_detail, parse_search_results, build_search_url
+from ebay_search import search_ebay, EbayItem
 
 app = Flask(__name__)
 
@@ -112,6 +113,8 @@ HTML_PAGE = u'''<!DOCTYPE html>
   .bulk-result-body .result-card { margin-bottom: 8px; }
   .bulk-result-body .result-card:last-child { margin-bottom: 0; }
   .bulk-result-body .result-card .result-link { font-size: 12px; padding: 6px 12px; }
+  .ebay-search-btn { border: 1px solid #0064d2 !important; color: #0064d2 !important; background: #fff !important; cursor: pointer; }
+  .ebay-search-btn:hover { background: #0064d2 !important; color: #fff !important; }
   .bulk-result-body .result-card .result-name { font-size: 13px; }
   .dl-btn { padding: 8px 16px; background: #333; color: white; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; margin-top: 8px; }
   .dl-btn:hover { background: #555; }
@@ -140,6 +143,9 @@ HTML_PAGE = u'''<!DOCTYPE html>
   .combined-grid .combined-col h3 { font-size: 14px; color: #333; margin-bottom: 12px; padding-bottom: 6px; border-bottom: 2px solid #eee; }
   .combined-grid .combined-col h3.mercari-header { border-bottom-color: #ea352d; }
   .combined-grid .combined-col h3.yahoo-header { border-bottom-color: #222; }
+  .combined-grid .result-name, .combined-grid .yahoo-title { white-space: normal; overflow: visible; text-overflow: clip; word-break: break-word; line-height: 1.4; }
+  .combined-grid .result-actions, .combined-grid .yahoo-actions { flex-wrap: wrap; justify-content: flex-end; max-width: 130px; }
+  .combined-grid .result-actions .result-link, .combined-grid .yahoo-actions .result-link { margin-bottom: 4px; }
   .combined-keyword-title { font-size: 13px; font-weight: 600; color: #555; margin: 12px 0 8px; padding: 6px 10px; background: #f5f5f5; border-radius: 6px; }
   .stock-card { display: flex; gap: 12px; padding: 12px 16px; background: white; border: 1px solid #eee; border-radius: 10px; align-items: center; margin-bottom: 8px; transition: box-shadow 0.2s; }
   .stock-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.1); }
@@ -156,6 +162,33 @@ HTML_PAGE = u'''<!DOCTYPE html>
   .stock-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 500; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .stock-keyword { font-size: 11px; font-weight: 600; color: #555; background: #f0f0f0; padding: 2px 8px; border-radius: 4px; white-space: nowrap; flex-shrink: 0; max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
   .stock-sno { font-size: 12px; font-weight: 700; color: #999; min-width: 28px; text-align: center; flex-shrink: 0; }
+  .ebay-result-card { display: flex; gap: 12px; padding: 12px; background: white; border: 1px solid #eee; border-radius: 10px; transition: box-shadow 0.2s; align-items: stretch; overflow: hidden; }
+  .ebay-result-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.1); }
+  .ebay-thumb { width: 90px; min-height: 90px; border-radius: 6px; overflow: hidden; flex-shrink: 0; background: #f5f5f5; }
+  .ebay-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .ebay-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .ebay-title { font-size: 14px; font-weight: 500; color: #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ebay-price-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .ebay-price { font-size: 18px; font-weight: 700; color: #0064d2; }
+  .ebay-price span { font-size: 11px; font-weight: 400; color: #999; }
+  .ebay-bin-price { font-size: 13px; color: #888; }
+  .ebay-meta { display: flex; gap: 12px; font-size: 11px; color: #777; flex-wrap: wrap; }
+  .ebay-meta span { display: inline-flex; align-items: center; gap: 3px; }
+  .ebay-badge { display: inline-block; font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 3px; margin-right: 4px; }
+  .ebay-badge.freeship { background: #e8f5e9; color: #2e7d32; }
+  .ebay-badge.toprated { background: #fff3e0; color: #e65100; }
+  .ebay-badge.auction { background: #e3f2fd; color: #1565c0; }
+  .ebay-badge.bin { background: #f3e5f5; color: #7b1fa2; }
+  .ebay-actions { display: flex; flex-direction: column; gap: 4px; flex-shrink: 0; justify-content: center; }
+  .ebay-actions .result-link { text-align: center; }
+  .ebay-thumb-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 28px; color: #ccc; }
+  .settings-section { background: #f9f9f9; border: 1px solid #eee; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .settings-section label { font-size: 12px; color: #666; margin-bottom: 2px; font-weight: 500; }
+  .settings-section input { padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; outline: none; flex: 1; min-width: 200px; background: white; }
+  .settings-section input:focus { border-color: #0064d2; }
+  .settings-section .btn-save { padding: 8px 16px; background: #0064d2; color: white; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; font-weight: 500; }
+  .settings-section .btn-save:hover { background: #0053b0; }
+  .settings-section .status-msg { font-size: 12px; color: #2e7d32; display: none; }
   @media (max-width: 768px) { .combined-grid { flex-direction: column; } .combined-grid .combined-col { width: 100%; } }
   @media (max-width: 600px) { .form-row { grid-template-columns: 1fr; } }
 </style>
@@ -164,6 +197,14 @@ HTML_PAGE = u'''<!DOCTYPE html>
 <div class="container">
   <h1>Mercari JP Search</h1>
   <div id="errorMsg" class="error-msg"></div>
+  <div class="settings-section" id="ebaySettings">
+    <label for="ebayAppId" style="white-space:nowrap;">eBay App ID:</label>
+    <input type="text" id="ebayAppId" placeholder="Paste your eBay App ID (Client ID)" value="" style="min-width:250px;">
+    <label for="ebayCertId" style="white-space:nowrap;">Cert ID:</label>
+    <input type="text" id="ebayCertId" placeholder="Paste your eBay Cert ID (Client Secret)" value="" style="min-width:250px;">
+    <button class="btn-save" onclick="saveEbayAppId()">Save</button>
+    <span class="status-msg" id="ebaySettingsStatus">Saved</span>
+  </div>
   <div class="tabs">
     <button class="tab-btn active" data-tab="simple" onclick="switchTab('simple')">Simple Search</button>
     <button class="tab-btn" data-tab="bulk" onclick="switchTab('bulk')">Mercari Bulk Search</button>
@@ -171,6 +212,8 @@ HTML_PAGE = u'''<!DOCTYPE html>
     <button class="tab-btn" data-tab="yahooBulk" onclick="switchTab('yahooBulk')">Yahoo Bulk</button>
     <button class="tab-btn" data-tab="combinedBulk" onclick="switchTab('combinedBulk')">Mercari + Yahoo Bulk</button>
     <button class="tab-btn" data-tab="stockCheck" onclick="switchTab('stockCheck')">Check Out Of Stock</button>
+    <button class="tab-btn" data-tab="ebay" onclick="switchTab('ebay')">eBay Search</button>
+    <button class="tab-btn" data-tab="ebayBulk" onclick="switchTab('ebayBulk')">eBay Bulk</button>
   </div>
   <div class="tab-content active" id="tabSimple">
   <div class="card">
@@ -498,6 +541,196 @@ HTML_PAGE = u'''<!DOCTYPE html>
     <div class="status"><div class="emoji">&#x1F50D;</div><p>Enter keywords and click Search Both</p></div>
   </div>
 </div>
+<div class="tab-content" id="tabEbay">
+  <div class="card">
+    <div class="form-row">
+      <div class="form-group full">
+        <label for="ebayKeyword">Keyword *</label>
+        <input type="text" id="ebayKeyword" placeholder="e.g. iPhone 15 Pro 256GB">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label for="ebayMinPrice">Min Price (USD)</label>
+        <input type="number" id="ebayMinPrice" placeholder="e.g. 100" step="0.01">
+      </div>
+      <div class="form-group">
+        <label for="ebayMaxPrice">Max Price (USD)</label>
+        <input type="number" id="ebayMaxPrice" placeholder="e.g. 2000" step="0.01">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label for="ebayCondition">Condition</label>
+        <select id="ebayCondition">
+          <option value="">All</option>
+          <option value="new">New</option>
+          <option value="open_box">Open Box</option>
+          <option value="refurbished">Refurbished</option>
+          <option value="used">Used</option>
+          <option value="for_parts">For Parts / Not Working</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="ebaySort">Sort By</label>
+        <select id="ebaySort">
+          <option value="best_match">Best Match</option>
+          <option value="price_asc" selected>Price: Low to High</option>
+          <option value="price_desc">Price: High to Low</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label for="ebaySite">eBay Site</label>
+        <select id="ebaySite">
+          <option value="EBAY-US" selected>United States</option>
+          <option value="EBAY-GB">United Kingdom</option>
+          <option value="EBAY-DE">Germany</option>
+          <option value="EBAY-FR">France</option>
+          <option value="EBAY-JAPAN">Japan</option>
+          <option value="EBAY-AU">Australia</option>
+          <option value="EBAY-CA">Canada</option>
+          <option value="EBAY-IT">Italy</option>
+          <option value="EBAY-ES">Spain</option>
+          <option value="EBAY-HK">Hong Kong</option>
+          <option value="EBAY-SG">Singapore</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="ebayItemLocation">Seller Location</label>
+        <select id="ebayItemLocation">
+          <option value="">Anywhere</option>
+          <option value="US">United States</option>
+          <option value="JP" selected>Japan</option>
+          <option value="PK">Pakistan</option>
+          <option value="GB">United Kingdom</option>
+          <option value="DE">Germany</option>
+          <option value="FR">France</option>
+          <option value="CA">Canada</option>
+          <option value="AU">Australia</option>
+          <option value="CN">China</option>
+          <option value="HK">Hong Kong</option>
+          <option value="SG">Singapore</option>
+          <option value="KR">South Korea</option>
+          <option value="TW">Taiwan</option>
+          <option value="IN">India</option>
+          <option value="AE">UAE</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group" style="display:flex;align-items:flex-end;">
+        <label style="opacity:0;">BIN Only</label>
+        <div style="display:flex;align-items:center;gap:8px;padding:8px 0;">
+          <input type="checkbox" id="ebayBINOnly" style="width:16px;height:16px;cursor:pointer;">
+          <label for="ebayBINOnly" style="margin:0;cursor:pointer;font-size:13px;">Buy It Now only</label>
+        </div>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label for="ebayLimit">Max Results</label>
+        <input type="number" id="ebayLimit" value="20" min="1" max="100">
+      </div>
+      <div class="form-group"></div>
+    </div>
+    <button class="btn-search" id="ebaySearchBtn" onclick="doEbaySearch()" style="background:#0064d2;">
+      <span class="spinner"></span>
+      <span class="btn-text">Search eBay</span>
+    </button>
+  </div>
+  <div id="ebayResultsContainer">
+    <div class="status" id="ebayInitialStatus">
+      <div class="emoji">&#x1F50D;</div>
+      <p>Enter a keyword and click Search. Set your eBay App ID in the settings bar above.</p>
+    </div>
+  </div>
+  <button class="dl-btn" id="ebayDlBtn" onclick="downloadEbayCSV()" style="display:none;margin-top:8px;background:#0064d2;">Download CSV</button>
+</div>
+<div class="tab-content" id="tabEbayBulk">
+  <div class="card">
+    <h2>eBay Bulk Search</h2>
+    <div class="bulk-area">
+      <div class="file-upload" id="ebayBulkFileUpload">
+        <input type="file" accept=".txt,.csv,.xlsx" id="ebayBulkFileInput" onchange="handleEbayBulkFile(event)">
+        <div class="file-label">Drop a <strong>.txt</strong>, <strong>.csv</strong>, or <strong>.xlsx</strong> file here or click to browse</div>
+      </div>
+      <div style="text-align:center;color:#999;font-size:12px;">&mdash; OR &mdash;</div>
+      <textarea id="ebayBulkKeywords" placeholder="Paste keywords here, one per line&#10;e.g.&#10;iPhone 15 Pro&#10;Canon PowerShot&#10;Roland SC-88"></textarea>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+        <div class="form-group" style="flex:1;min-width:100px;">
+          <label for="ebayBulkLimit">Per Keyword</label>
+          <select id="ebayBulkLimit"><option value="1">1</option><option value="2">2</option><option value="3" selected>3</option><option value="5">5</option><option value="10">10</option></select>
+        </div>
+        <div class="form-group" style="flex:1;min-width:120px;">
+          <label for="ebayBulkCondition">Condition</label>
+          <select id="ebayBulkCondition">
+            <option value="">All</option>
+            <option value="new">New</option>
+            <option value="open_box">Open Box</option>
+            <option value="refurbished">Refurbished</option>
+            <option value="used">Used</option>
+            <option value="for_parts">For Parts</option>
+          </select>
+        </div>
+        <div class="form-group" style="flex:1;min-width:120px;">
+          <label for="ebayBulkSort">Sort By</label>
+          <select id="ebayBulkSort">
+            <option value="best_match">Best Match</option>
+            <option value="price_asc">Price: Low to High</option>
+            <option value="price_desc">Price: High to Low</option>
+          </select>
+        </div>
+        <div class="form-group" style="flex:1;min-width:100px;">
+          <label for="ebayBulkItemLocation">Seller Location</label>
+          <select id="ebayBulkItemLocation">
+            <option value="">Anywhere</option>
+            <option value="US">United States</option>
+            <option value="JP">Japan</option>
+            <option value="PK">Pakistan</option>
+            <option value="GB">United Kingdom</option>
+            <option value="DE">Germany</option>
+            <option value="CA">Canada</option>
+            <option value="AU">Australia</option>
+            <option value="CN">China</option>
+            <option value="SG">Singapore</option>
+            <option value="KR">South Korea</option>
+          </select>
+        </div>
+        <div class="form-group" style="flex:1;min-width:120px;">
+          <label for="ebayBulkSite">eBay Site</label>
+          <select id="ebayBulkSite">
+            <option value="EBAY-US">United States</option>
+            <option value="EBAY-GB">United Kingdom</option>
+            <option value="EBAY-DE">Germany</option>
+            <option value="EBAY-JAPAN">Japan</option>
+            <option value="EBAY-AU">Australia</option>
+            <option value="EBAY-CA">Canada</option>
+          </select>
+        </div>
+        <div class="form-group" style="flex:1;min-width:80px;">
+          <label for="ebayBulkMinPrice">Min $</label>
+          <input type="number" id="ebayBulkMinPrice" placeholder="e.g. 50" step="0.01">
+        </div>
+        <div class="form-group" style="flex:1;min-width:80px;">
+          <label for="ebayBulkMaxPrice">Max $</label>
+          <input type="number" id="ebayBulkMaxPrice" placeholder="e.g. 2000" step="0.01">
+        </div>
+        <div class="form-group" style="flex:0;align-self:flex-end;margin-top:18px;display:flex;align-items:center;gap:6px;">
+          <input type="checkbox" id="ebayBulkBINOnly" style="width:16px;height:16px;cursor:pointer;">
+          <label for="ebayBulkBINOnly" style="margin:0;cursor:pointer;font-size:12px;white-space:nowrap;">BIN Only</label>
+        </div>
+        <button class="btn-search" id="ebayBulkBtn" onclick="doEbayBulkSearch()" style="flex:1;min-width:150px;margin-top:18px;background:#0064d2;">
+          <span class="spinner"></span>
+          <span class="btn-text">Search eBay Bulk</span>
+        </button>
+      </div>
+      <div class="bulk-keyword-count" id="ebayBulkCount"></div>
+    </div>
+  </div>
+  <div id="ebayBulkResults"></div>
+</div>
 <div class="tab-content" id="tabStockCheck">
   <div class="card">
     <h2>Check Out Of Stock</h2>
@@ -598,6 +831,12 @@ function toggleBulkGroup(el) {
 }
 
 
+var JPY_RATE = 163.53;
+function toJpyDisplay(usd) {
+  var jpy = Math.round(Number(usd) * JPY_RATE);
+  return '&nbsp;≈&nbsp;&yen;' + jpy.toLocaleString();
+}
+
 function handleImageError(img) {
   if (img && img.parentElement) {
     img.parentElement.className = 'result-icon';
@@ -657,6 +896,14 @@ function switchTab(name) {
     content.classList.remove('active');
     if (content.id === targetId) content.classList.add('active');
   });
+}
+
+function searchEbayForKeyword(el) {
+  const kw = el.getAttribute('data-kw');
+  if (!kw) return;
+  document.getElementById('ebayKeyword').value = kw;
+  switchTab('ebay');
+  setTimeout(doEbaySearch, 100);
 }
 async function handleFile(e) {
   const file = e.target.files[0];
@@ -783,6 +1030,7 @@ function appendBulkResult(kw, items) {
       + '<div class="result-actions">'
       + '<button class="result-link desc-btn" data-item-id="'+escapeHtml(item.id)+'">Desc</button>'
       + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View</a>'
+      + '<button class="result-link ebay-search-btn" data-kw="'+escapeHtml(name)+'" onclick="searchEbayForKeyword(this)">Search eBay</button>'
       + '</div></div>';
     window._bulkCSV.push({keyword: kw, name: name, price: item.price, url: item.url, status: item.status, condition_en: item.condition_en, seller_name: item.seller_name, seller_reviews: item.seller_reviews, updated: item.updated});
   }
@@ -1133,6 +1381,7 @@ function appendCombinedResult(kw, mercariItems, yahooItems) {
         + '<div class="result-actions">'
         + '<button class="result-link desc-btn" data-item-id="'+escapeHtml(item.id)+'">Description</button>'
         + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View</a>'
+        + '<button class="result-link ebay-search-btn" data-kw="'+escapeHtml(kw)+'" onclick="searchEbayForKeyword(this)">Search eBay</button>'
         + '</div></div>';
     }
   } else {
@@ -1166,6 +1415,7 @@ function appendCombinedResult(kw, mercariItems, yahooItems) {
         + '<div class="yahoo-actions">'
         + '<button class="result-link desc-btn" data-yahoo-id="'+escapeHtml(item.id)+'">Detail</button>'
         + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View</a>'
+        + '<button class="result-link ebay-search-btn" data-kw="'+escapeHtml(kw)+'" onclick="searchEbayForKeyword(this)">Search eBay</button>'
         + '</div></div>';
     }
   } else {
@@ -1278,6 +1528,299 @@ function downloadStockCSV() {
   }
   const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'stock_check_results.csv'; a.click();
+}
+
+// eBay Settings
+function saveEbayAppId() {
+  const appId = document.getElementById('ebayAppId').value.trim();
+  const certId = document.getElementById('ebayCertId').value.trim();
+  localStorage.setItem('ebay_app_id', appId);
+  localStorage.setItem('ebay_cert_id', certId);
+  const status = document.getElementById('ebaySettingsStatus');
+  status.style.display = 'inline';
+  status.textContent = 'Saved' + (appId && certId ? '' : ' (incomplete)');
+  setTimeout(function(){ status.style.display = 'none'; }, 2000);
+}
+
+function getEbayCredentials() {
+  let appId = document.getElementById('ebayAppId').value.trim();
+  let certId = document.getElementById('ebayCertId').value.trim();
+  if (!appId) {
+    const storedApp = localStorage.getItem('ebay_app_id');
+    if (storedApp) { appId = storedApp; document.getElementById('ebayAppId').value = storedApp; }
+  }
+  if (!certId) {
+    const storedCert = localStorage.getItem('ebay_cert_id');
+    if (storedCert) { certId = storedCert; document.getElementById('ebayCertId').value = storedCert; }
+  }
+  return { appId: appId, certId: certId };
+}
+
+(function loadEbayCredentials() {
+  const storedApp = localStorage.getItem('ebay_app_id');
+  const storedCert = localStorage.getItem('ebay_cert_id');
+  if (storedApp) document.getElementById('ebayAppId').value = storedApp;
+  if (storedCert) document.getElementById('ebayCertId').value = storedCert;
+})();
+
+// eBay Simple Search
+document.getElementById('ebayKeyword').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') doEbaySearch();
+});
+
+let _ebayItems = [];
+
+async function doEbaySearch() {
+  const btn = document.getElementById('ebaySearchBtn');
+  const errDiv = document.getElementById('errorMsg');
+  errDiv.style.display = 'none';
+  const keyword = document.getElementById('ebayKeyword').value.trim();
+  if (!keyword) { showError('Please enter a keyword'); return; }
+  const creds = getEbayCredentials();
+  if (!creds.appId) { showError('Please set your eBay App ID in the settings bar above'); return; }
+  if (!creds.certId) { showError('Please set your eBay Cert ID in the settings bar above'); return; }
+  btn.classList.add('loading'); btn.disabled = true;
+  try {
+    const params = new URLSearchParams({
+      keyword: keyword,
+      app_id: creds.appId,
+      cert_id: creds.certId,
+      min_price: document.getElementById('ebayMinPrice').value || '',
+      max_price: document.getElementById('ebayMaxPrice').value || '',
+      condition: document.getElementById('ebayCondition').value,
+      sort: document.getElementById('ebaySort').value,
+      global_id: document.getElementById('ebaySite').value,
+      item_location: document.getElementById('ebayItemLocation').value,
+      bin_only: document.getElementById('ebayBINOnly').checked ? '1' : '',
+      limit: document.getElementById('ebayLimit').value || '20'
+    });
+    const resp = await fetch('/api/ebay-search?'+params.toString());
+    if (!resp.ok) { const e = await resp.json(); throw new Error(e.error || 'Search failed'); }
+    const data = await resp.json();
+    renderEbayResults(data.items, keyword);
+    _ebayItems = data.items || [];
+    document.getElementById('ebayDlBtn').style.display = data.items && data.items.length ? 'inline-block' : 'none';
+  } catch (e) { showError(e.message); }
+  finally { btn.classList.remove('loading'); btn.disabled = false; }
+}
+
+function getShippingHtml(item) {
+  if (item.free_shipping) return '<span>&#x1F69A; Free Shipping</span>';
+  if (item.shipping_type === 'CALCULATED') return '<span>&#x1F69A; Shipping: Calculated</span>';
+  if (item.shipping_cost !== null && item.shipping_cost !== undefined) {
+    const sym = item.currency === 'USD' ? '$' : (item.currency === 'JPY' ? '&yen;' : item.currency+' ');
+    return '<span>&#x1F69A; Shipping: '+sym+Number(item.shipping_cost).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})+'</span>';
+  }
+  return '';
+}
+
+function renderEbayResults(items, keyword) {
+  const container = document.getElementById('ebayResultsContainer');
+  if (!items || !items.length) {
+    container.innerHTML = '<div class="status"><div class="emoji">&#x1F622;</div><p>No results found for "'+escapeHtml(keyword)+'"</p></div>';
+    return;
+  }
+  let html = '<div class="count-badge">Found <strong>'+items.length+'</strong> item'+(items.length>1?'s':'')+'</div><div class="results">';
+  for (const item of items) {
+    const badges = [];
+    if (item.free_shipping) badges.push('<span class="ebay-badge freeship">FREE SHIP</span>');
+    if (item.top_rated_seller) badges.push('<span class="ebay-badge toprated">TOP RATED</span>');
+    if (item.is_auction) badges.push('<span class="ebay-badge auction">AUCTION</span>');
+    else badges.push('<span class="ebay-badge bin">BUY IT NOW</span>');
+
+    const priceSymbol = item.currency === 'USD' ? '$' : (item.currency === 'JPY' ? '&yen;' : item.currency+' ');
+    let totalHtml = '';
+    if (item.free_shipping) {
+      var t = Number(item.price);
+      totalHtml = '<div class="result-price" style="font-size:13px;color:#2e7d32;">Total: '+priceSymbol+t.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})+' <span style="font-size:10px;">(incl. free ship)</span>'+(item.currency==='USD'?' '+toJpyDisplay(t):'')+'</div>';
+    } else if (item.shipping_cost !== null && item.shipping_cost !== undefined) {
+      var t = Number(item.price) + Number(item.shipping_cost);
+      totalHtml = '<div class="result-price" style="font-size:13px;color:#555;">Total: '+priceSymbol+t.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})+' <span style="font-size:10px;">(incl. shipping)</span>'+(item.currency==='USD'?' '+toJpyDisplay(t):'')+'</div>';
+    }
+    html += '<div class="ebay-result-card">'
+      + '<div class="ebay-thumb">'
+      + (item.thumbnail ? '<img src="'+escapeHtml(item.thumbnail)+'" alt="" loading="lazy" onerror="handleImageError(this)">' : '<div class="ebay-thumb-placeholder">&#x1F4E6;</div>')
+      + '</div>'
+      + '<div class="ebay-info">'
+      + '<div class="ebay-title">'+escapeHtml(item.title)+'</div>'
+      + '<div class="ebay-price-row">'
+      + '<div class="ebay-price">'+priceSymbol+Number(item.price).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})+' <span>'+item.currency+'</span>'
+      + (item.currency === 'USD' ? '<span style="font-size:11px;color:#888;">'+toJpyDisplay(item.price)+'</span>' : '')
+      + '</div>'
+      + (item.buy_it_now_price ? '<div class="ebay-bin-price">BIN '+priceSymbol+Number(item.buy_it_now_price).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})+'</div>' : '')
+      + '</div>'
+      + totalHtml
+      + '<div class="ebay-meta">'
+      + (item.condition ? '<span>'+escapeHtml(item.condition)+'</span>' : '')
+      + (item.bid_count !== null && item.bid_count !== undefined ? '<span>&#x1F3F7; '+item.bid_count+' bid'+(item.bid_count!==1?'s':'')+'</span>' : '')
+      + (item.seller_name ? '<span>&#x1F464; '+escapeHtml(item.seller_name)+'</span>' : '')
+      + (item.seller_rating ? '<span>&#x2B50; '+item.seller_rating+'</span>' : '')
+      + (item.location ? '<span>&#x1F4CD; '+escapeHtml(item.location)+'</span>' : '')
+      + getShippingHtml(item)
+      + '</div>'
+      + '<div>'+badges.join(' ')+'</div>'
+      + '</div>'
+      + '<div class="ebay-actions">'
+      + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener" style="border:1px solid #0064d2;color:#0064d2;background:white;">View &rarr;</a>'
+      + '</div>'
+      + '</div>';
+  }
+  html += '</div>';
+  container.innerHTML = html;
+}
+
+function downloadEbayCSV() {
+  const data = _ebayItems;
+  if (!data.length) return;
+  let csv = '\uFEFFTitle,Price,Currency,BuyNow,Bids,Condition,Seller,Rating,Location,Free Shipping,Shipping Cost,Total,Type,URL\\n';
+  for (const r of data) {
+    const total = r.free_shipping ? r.price : (r.shipping_cost != null ? Number(r.price) + Number(r.shipping_cost) : '');
+    csv += '"'+(r.title||'').replace(/"/g,'""')+'",'+r.price+','+r.currency+','+(r.buy_it_now_price||'')+','+(r.bid_count!==null&&r.bid_count!==undefined?r.bid_count:'')+',"'+escapeHtml(r.condition)+'","'+(r.seller_name||'')+'","'+(r.seller_rating||'')+'","'+(r.location||'')+'","'+(r.free_shipping?'Yes':'No')+'","'+(r.shipping_cost||'')+'","'+total+'","'+(r.listing_type||'')+'","'+r.url+'"\\n';
+  }
+  const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'ebay_results.csv'; a.click();
+}
+
+// eBay Bulk Search
+document.getElementById('ebayBulkKeywords').addEventListener('input', updateEbayBulkCount);
+
+function updateEbayBulkCount() {
+  const v = document.getElementById('ebayBulkKeywords').value.trim();
+  const n = v ? v.split('\\n').filter(function(l){ return l.trim(); }).length : 0;
+  document.getElementById('ebayBulkCount').textContent = n ? n+' keyword(s) loaded' : '';
+}
+
+async function handleEbayBulkFile(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (ext === 'txt' || ext === 'csv') {
+    const text = await file.text();
+    document.getElementById('ebayBulkKeywords').value = text;
+  } else {
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      const resp = await fetch('/api/upload-keywords', { method: 'POST', body: formData });
+      if (!resp.ok) throw new Error('Upload failed');
+      const data = await resp.json();
+      if (data.keywords) document.getElementById('ebayBulkKeywords').value = data.keywords.join('\\n');
+    } catch(e) { showError(e.message); }
+  }
+  updateEbayBulkCount();
+}
+
+async function doEbayBulkSearch() {
+  const btn = document.getElementById('ebayBulkBtn');
+  const errDiv = document.getElementById('errorMsg');
+  errDiv.style.display = 'none';
+  const creds = getEbayCredentials();
+  if (!creds.appId) { showError('Please set your eBay App ID in the settings bar above'); return; }
+  if (!creds.certId) { showError('Please set your eBay Cert ID in the settings bar above'); return; }
+  const text = document.getElementById('ebayBulkKeywords').value.trim();
+  if (!text) { showError('Enter keywords or upload a file'); return; }
+  const keywords = text.split('\\n').map(function(l){ return l.trim(); }).filter(function(l){ return l; });
+  if (!keywords.length) { showError('No valid keywords found'); return; }
+  if (keywords.length > 100) { showError('Maximum 100 keywords allowed'); return; }
+  btn.classList.add('loading'); btn.disabled = true;
+  const total = keywords.length;
+  const container = document.getElementById('ebayBulkResults');
+  container.innerHTML = '<div class="count-badge streaming">Searching... 0/'+total+'</div><div id="ebayBulkGroups"></div>';
+  window._ebayBulkCSV = [];
+  let doneCount = 0;
+  try {
+    await streamBulkSearch('/api/ebay-bulk-search', {
+      keywords: keywords,
+      app_id: creds.appId,
+      cert_id: creds.certId,
+      per_keyword: parseInt(document.getElementById('ebayBulkLimit').value) || 3,
+      condition: document.getElementById('ebayBulkCondition').value,
+      sort: document.getElementById('ebayBulkSort').value,
+      global_id: document.getElementById('ebayBulkSite').value,
+      item_location: document.getElementById('ebayBulkItemLocation').value,
+      min_price: document.getElementById('ebayBulkMinPrice').value || '',
+      max_price: document.getElementById('ebayBulkMaxPrice').value || '',
+      bin_only: document.getElementById('ebayBulkBINOnly').checked ? '1' : ''
+    }, function(data) {
+      appendEbayBulkResult(data.keyword, data.items);
+      doneCount++;
+      const badge = container.querySelector('.count-badge');
+      if (badge) badge.innerHTML = 'Searching... '+doneCount+'/'+total;
+    }, function() {
+      const badge = container.querySelector('.count-badge');
+      if (badge) badge.innerHTML = 'Results for <strong>'+doneCount+'</strong> keyword(s)';
+      const groups = document.getElementById('ebayBulkGroups');
+      if (groups) {
+        const dl = document.createElement('button');
+        dl.className = 'dl-btn'; dl.style.marginTop = '12px'; dl.style.background = '#0064d2';
+        dl.textContent = 'Download CSV'; dl.onclick = downloadEbayBulkCSV;
+        groups.appendChild(dl);
+      }
+    });
+  } catch(e) { showError(e.message); }
+  finally { btn.classList.remove('loading'); btn.disabled = false; }
+}
+
+function appendEbayBulkResult(kw, items) {
+  const groups = document.getElementById('ebayBulkGroups');
+  if (!groups) return;
+  if (!items || !items.length) return;
+  let html = '<div class="bulk-result-group"><div class="bulk-result-header" onclick="toggleBulkGroup(this)">'
+    + escapeHtml(kw) + ' <span class="count">'+items.length+' item(s)</span></div>'
+    + '<div class="bulk-result-body"><div class="results">';
+  for (const item of items) {
+    const badges = [];
+    if (item.free_shipping) badges.push('<span class="ebay-badge freeship">FREE SHIP</span>');
+    if (item.top_rated_seller) badges.push('<span class="ebay-badge toprated">TOP RATED</span>');
+    if (item.is_auction) badges.push('<span class="ebay-badge auction">AUCTION</span>');
+    else badges.push('<span class="ebay-badge bin">BIN</span>');
+
+    const priceSymbol = item.currency === 'USD' ? '$' : (item.currency === 'JPY' ? '&yen;' : item.currency+' ');
+    let totalHtml = '';
+    if (item.free_shipping) {
+      var t = Number(item.price);
+      totalHtml = '<div style="font-size:12px;color:#2e7d32;">Total: '+priceSymbol+t.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})+' <span style="font-size:10px;">(incl. free ship)</span>'+(item.currency==='USD'?' '+toJpyDisplay(t):'')+'</div>';
+    } else if (item.shipping_cost !== null && item.shipping_cost !== undefined) {
+      var t = Number(item.price) + Number(item.shipping_cost);
+      totalHtml = '<div style="font-size:12px;color:#555;">Total: '+priceSymbol+t.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})+' <span style="font-size:10px;">(incl. shipping)</span>'+(item.currency==='USD'?' '+toJpyDisplay(t):'')+'</div>';
+    }
+    html += '<div class="ebay-result-card" style="margin-bottom:8px;">'
+      + '<div class="ebay-thumb" style="width:60px;min-height:60px;">'
+      + (item.thumbnail ? '<img src="'+escapeHtml(item.thumbnail)+'" alt="" loading="lazy" onerror="handleImageError(this)">' : '<div class="ebay-thumb-placeholder">&#x1F4E6;</div>')
+      + '</div>'
+      + '<div class="ebay-info">'
+      + '<div class="ebay-title">'+escapeHtml(item.title)+'</div>'
+      + '<div class="ebay-price-row">'
+      + '<div class="ebay-price" style="font-size:15px;">'+priceSymbol+Number(item.price).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})+' <span style="font-size:11px;color:#888;">'+(item.currency==='USD'?toJpyDisplay(item.price):'')+'</span></div>'
+      + (item.buy_it_now_price ? '<div class="ebay-bin-price">BIN '+priceSymbol+Number(item.buy_it_now_price).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})+'</div>' : '')
+      + '</div>'
+      + totalHtml
+      + '<div class="ebay-meta">'
+      + (item.condition ? '<span>'+escapeHtml(item.condition)+'</span>' : '')
+      + (item.bid_count !== null && item.bid_count !== undefined ? '<span>'+item.bid_count+' bids</span>' : '')
+      + getShippingHtml(item)
+      + '</div>'
+      + '<div>'+badges.join(' ')+'</div>'
+      + '</div>'
+      + '<div class="ebay-actions">'
+      + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener" style="border:1px solid #0064d2;color:#0064d2;background:white;font-size:12px;padding:6px 10px;">View</a>'
+      + '</div></div>';
+    window._ebayBulkCSV.push({keyword: kw, title: item.title, price: item.price, currency: item.currency, buy_it_now_price: item.buy_it_now_price, bid_count: item.bid_count, condition: item.condition, seller_name: item.seller_name, location: item.location, free_shipping: item.free_shipping, shipping_cost: item.shipping_cost, listing_type: item.listing_type, url: item.url});
+  }
+  html += '</div></div></div>';
+  groups.insertAdjacentHTML('beforeend', html);
+}
+
+function downloadEbayBulkCSV() {
+  const data = window._ebayBulkCSV || [];
+  if (!data.length) return;
+  let csv = '\uFEFFKeyword,Title,Price,Currency,BuyNow,Bids,Condition,Seller,Location,Free Shipping,Shipping Cost,Total,Type,URL\\n';
+  for (const r of data) {
+    const total = r.free_shipping ? r.price : (r.shipping_cost != null ? Number(r.price) + Number(r.shipping_cost) : '');
+    csv += '"'+r.keyword+'","'+(r.title||'').replace(/"/g,'""')+'",'+r.price+','+r.currency+','+(r.buy_it_now_price||'')+','+(r.bid_count!==null&&r.bid_count!==undefined?r.bid_count:'')+',"'+escapeHtml(r.condition)+'","'+(r.seller_name||'')+'","'+(r.location||'')+'","'+(r.free_shipping?'Yes':'No')+'","'+(r.shipping_cost||'')+'","'+total+'","'+(r.listing_type||'')+'","'+r.url+'"\\n';
+  }
+  const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'ebay_bulk_results.csv'; a.click();
 }
 
 // Event delegation for description buttons
@@ -2304,9 +2847,190 @@ def api_check_stock():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/ebay-search')
+def api_ebay_search():
+    keyword = request.args.get('keyword', '').strip()
+    if not keyword:
+        return jsonify({'error': 'Keyword is required'}), 400
+
+    app_id = request.args.get('app_id', '').strip()
+    cert_id = request.args.get('cert_id', '').strip()
+    if not app_id:
+        app_id = os.environ.get('EBAY_APP_ID', '')
+    if not cert_id:
+        cert_id = os.environ.get('EBAY_CERT_ID', '')
+    if not app_id:
+        return jsonify({'error': 'eBay App ID is required.'}), 400
+    if not cert_id:
+        return jsonify({'error': 'eBay Cert ID is required.'}), 400
+
+    min_price = request.args.get('min_price', '').strip()
+    max_price = request.args.get('max_price', '').strip()
+    condition = request.args.get('condition', '').strip()
+    sort = request.args.get('sort', 'best_match').strip()
+    global_id = request.args.get('global_id', 'EBAY-US').strip()
+    item_location = request.args.get('item_location', '').strip()
+    bin_only = request.args.get('bin_only', '') == '1'
+    limit = request.args.get('limit', '20').strip()
+
+    try:
+        limit = int(limit) if limit else 20
+    except ValueError:
+        limit = 20
+    limit = max(1, min(limit, 100))
+
+    min_price_val = None
+    max_price_val = None
+    try:
+        min_price_val = float(min_price) if min_price else None
+    except ValueError:
+        pass
+    try:
+        max_price_val = float(max_price) if max_price else None
+    except ValueError:
+        pass
+
+    try:
+        results = search_ebay(
+            app_id=app_id,
+            cert_id=cert_id,
+            keyword=keyword,
+            min_price=min_price_val,
+            max_price=max_price_val,
+            condition=condition,
+            sort=sort,
+            limit=limit,
+            global_id=global_id,
+            bin_only=bin_only,
+            item_location=item_location,
+        )
+
+        items = []
+        for item in results:
+            items.append({
+                'id': item.id,
+                'title': item.title,
+                'price': item.price,
+                'currency': item.currency,
+                'condition': item.condition,
+                'condition_id': item.condition_id,
+                'thumbnail': item.thumbnail,
+                'url': item.url,
+                'listing_type': item.listing_type,
+                'bid_count': item.bid_count,
+                'buy_it_now_price': item.buy_it_now_price,
+                'seller_name': item.seller_name,
+                'seller_rating': item.seller_rating,
+                'seller_feedback_percent': item.seller_feedback_percent,
+                'location': item.location,
+                'shipping_cost': item.shipping_cost,
+                'shipping_type': item.shipping_type,
+                'free_shipping': item.free_shipping,
+                'end_time': item.end_time,
+                'is_auction': item.is_auction,
+                'top_rated_seller': item.top_rated_seller,
+                'category_name': item.category_name,
+            })
+
+        return jsonify({'items': items, 'count': len(items)})
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ebay-bulk-search', methods=['POST'])
+def api_ebay_bulk_search():
+    try:
+        data = request.get_json()
+        if not data or 'keywords' not in data:
+            return jsonify({'error': 'Keywords required'}), 400
+        keywords = data['keywords']
+        if not isinstance(keywords, list) or not keywords:
+            return jsonify({'error': 'Keywords must be a non-empty array'}), 400
+
+        app_id = data.get('app_id', '').strip()
+        cert_id = data.get('cert_id', '').strip()
+        if not app_id:
+            app_id = os.environ.get('EBAY_APP_ID', '')
+        if not cert_id:
+            cert_id = os.environ.get('EBAY_CERT_ID', '')
+        if not app_id:
+            return jsonify({'error': 'eBay App ID is required'}), 400
+        if not cert_id:
+            return jsonify({'error': 'eBay Cert ID is required'}), 400
+
+        per_keyword = int(data.get('per_keyword', 3))
+        per_keyword = max(1, min(per_keyword, 20))
+        condition = data.get('condition', '')
+        sort = data.get('sort', 'best_match')
+        global_id = data.get('global_id', 'EBAY-US')
+        min_price = data.get('min_price', '')
+        max_price = data.get('max_price', '')
+        bin_only = data.get('bin_only', '') in ('1', 'true', True)
+        item_location = data.get('item_location', '')
+
+        min_price_val = float(min_price) if min_price else None
+        max_price_val = float(max_price) if max_price else None
+
+        def search_keyword(kw):
+            try:
+                results = search_ebay(
+                    app_id=app_id,
+                    cert_id=cert_id,
+                    keyword=kw,
+                    min_price=min_price_val,
+                    max_price=max_price_val,
+                    condition=condition,
+                    sort=sort,
+                    limit=per_keyword,
+                    global_id=global_id,
+                    bin_only=bin_only,
+                    item_location=item_location,
+                )
+                items = []
+                for item in results[:per_keyword]:
+                    items.append({
+                        'id': item.id,
+                        'title': item.title,
+                        'price': item.price,
+                        'currency': item.currency,
+                        'condition': item.condition,
+                        'thumbnail': item.thumbnail,
+                        'url': item.url,
+                        'listing_type': item.listing_type,
+                        'bid_count': item.bid_count,
+                        'buy_it_now_price': item.buy_it_now_price,
+                        'seller_name': item.seller_name,
+                        'seller_rating': item.seller_rating,
+                        'location': item.location,
+                        'shipping_cost': item.shipping_cost,
+                        'shipping_type': item.shipping_type,
+                        'free_shipping': item.free_shipping,
+                        'is_auction': item.is_auction,
+                        'top_rated_seller': item.top_rated_seller,
+                    })
+                return kw, items
+            except Exception:
+                return kw, []
+
+        keywords_list = [k.strip() for k in keywords[:100] if k.strip()]
+
+        def generate():
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                futures = {pool.submit(search_keyword, kw): kw for kw in keywords_list}
+                for f in as_completed(futures):
+                    kw, items = f.result()
+                    yield 'data: ' + json.dumps({'keyword': kw, 'items': items}, ensure_ascii=False) + '\n\n'
+            yield 'data: ' + json.dumps({'complete': True, 'keywords': keywords_list}, ensure_ascii=False) + '\n\n'
+
+        return Response(stream_with_context(generate()), mimetype='text/event-stream')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 if __name__ == '__main__':
     print('='*60)
-    print(' Mercari JP Search + Yahoo Auctions GUI')
+    print(' Mercari JP Search + Yahoo Auctions + eBay GUI')
     print('='*60)
     print(' Open http://127.0.0.1:5000 in your browser')
     print(' Press CTRL+C to stop the server')

@@ -1,3 +1,5 @@
+import os
+import sys
 from typing import List, Optional
 from mercari import (
     MercariOrder, MercariSearchStatus, MercariSort,
@@ -5,6 +7,9 @@ from mercari import (
 )
 from pydantic import Field
 from fastmcp import FastMCP
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'temp_download'))
+from ebay_search import search_ebay, EbayItem
 
 mercari_mcp = FastMCP(name="MercariSearchComplete")
 
@@ -92,6 +97,91 @@ def search_mercari_items_filtered(
     except Exception as e:
         print(f"Error: An error occurred during Mercari search: {e}")
         raise e
+
+@mercari_mcp.tool(name="search_ebay",
+                description="""Search eBay for items with keyword, price, condition filtering.
+                Args:
+                    keyword (str): The main keyword to search for (e.g., 'iPhone 15 Pro 256GB').
+                    min_price (float, optional): Minimum price in USD.
+                    max_price (float, optional): Maximum price in USD.
+                    condition (str, optional): Item condition - 'new', 'used', 'open_box', 'refurbished', 'for_parts'.
+                    sort (str, optional): Sort order - 'best_match', 'price_asc', 'price_desc'.
+                    limit (int): Maximum number of items to return (max 100).
+                    global_id (str, optional): eBay site to search - 'EBAY-US', 'EBAY-GB', 'EBAY-DE', 'EBAY-JAPAN', etc.
+                    bin_only (bool): Only show Buy It Now items.
+                    item_location (str, optional): Filter by item location country code, e.g. 'US', 'JP', 'PK', 'GB'.
+                    app_id (str, optional): eBay App ID (Client ID). Falls back to EBAY_APP_ID env var.
+                    cert_id (str, optional): eBay Cert ID (Client Secret). Falls back to EBAY_CERT_ID env var.""")
+def search_ebay_items(
+    keyword: str = Field(..., description="The main keyword to search for (e.g., 'iPhone 15 Pro 256GB')."),
+    min_price: Optional[float] = Field(None, description="Minimum price in USD.", ge=0),
+    max_price: Optional[float] = Field(None, description="Maximum price in USD.", ge=0),
+    condition: str = Field("", description="Item condition: new, used, open_box, refurbished, for_parts."),
+    sort: str = Field("best_match", description="Sort order: best_match, price_asc, price_desc, newly_listed, ending_soon."),
+    limit: int = Field(20, description="Maximum number of items to return.", ge=1, le=100),
+    global_id: str = Field("EBAY-US", description="eBay site: EBAY-US, EBAY-GB, EBAY-DE, EBAY-JAPAN, etc."),
+    bin_only: bool = Field(False, description="Only show Buy It Now items."),
+    item_location: str = Field("", description="Filter by item location country code, e.g. 'US', 'JP', 'PK', 'GB'."),
+    app_id: Optional[str] = Field(None, description="eBay App ID (Client ID). Falls back to EBAY_APP_ID env var."),
+    cert_id: Optional[str] = Field(None, description="eBay Cert ID (Client Secret). Falls back to EBAY_CERT_ID env var.")
+) -> str:
+    try:
+        ebay_app_id = app_id or os.environ.get("EBAY_APP_ID", "")
+        ebay_cert_id = cert_id or os.environ.get("EBAY_CERT_ID", "")
+        if not ebay_app_id:
+            return "Error: eBay App ID is required. Set EBAY_APP_ID environment variable or pass app_id parameter."
+        if not ebay_cert_id:
+            return "Error: eBay Cert ID is required. Set EBAY_CERT_ID environment variable or pass cert_id parameter."
+
+        results = search_ebay(
+            app_id=ebay_app_id,
+            cert_id=ebay_cert_id,
+            keyword=keyword,
+            min_price=min_price,
+            max_price=max_price,
+            condition=condition,
+            sort=sort,
+            limit=limit,
+            global_id=global_id,
+            bin_only=bin_only,
+            item_location=item_location,
+        )
+
+        if not results:
+            return f"No eBay items found for '{keyword}'."
+
+        items_found: List[str] = []
+        for item in results:
+            parts = [f"### {item.title}"]
+            if item.thumbnail:
+                parts.append(f"![{item.title}]({item.thumbnail})")
+            price_str = f"${item.price:,.2f}" if item.currency == "USD" else f"{item.currency} {item.price:,.2f}"
+            details = f"**Price:** {price_str}"
+            if item.buy_it_now_price:
+                details += f" | BIN: ${item.buy_it_now_price:,.2f}"
+            if item.condition:
+                details += f" | {item.condition}"
+            if item.bid_count is not None:
+                details += f" | {item.bid_count} bid(s)"
+            total_str = ""
+            if item.free_shipping:
+                details += " | Free Shipping (Total: " + price_str + ")"
+            elif item.shipping_type == "CALCULATED":
+                details += " | Shipping: Calculated"
+            elif item.shipping_cost is not None:
+                total = item.price + item.shipping_cost
+                total_s = f"${total:,.2f}" if item.currency == "USD" else f"{item.currency} {total:,.2f}"
+                details += f" | Shipping: ${item.shipping_cost:.2f} (Total: {total_s})"
+            parts.append(details)
+            parts.append(f"[View on eBay]({item.url})")
+            items_found.append("\n".join(parts))
+
+        return "\n\n---\n\n".join(items_found)
+
+    except Exception as e:
+        print(f"Error: eBay search failed: {e}")
+        return f"Error searching eBay: {str(e)}"
+
 
 if __name__ == "__main__":
     mercari_mcp.run()
