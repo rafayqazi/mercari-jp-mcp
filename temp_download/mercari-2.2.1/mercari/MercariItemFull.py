@@ -90,11 +90,11 @@ class ItemCategory(Printable):
     def __init__(self, *args, **kwargs):
         self.id = kwargs['id']
         self.name = kwargs['name']
-        self.display_order = kwargs['display_order']
-        self.parent_category_id = kwargs['parent_category_id']
-        self.parent_category_name = kwargs['parent_category_name']
-        self.root_category_id = kwargs['root_category_id']
-        self.root_category_name = kwargs['root_category_name']
+        self.display_order = kwargs.get('display_order')
+        self.parent_category_id = kwargs.get('parent_category_id')
+        self.parent_category_name = kwargs.get('parent_category_name')
+        self.root_category_id = kwargs.get('root_category_id')
+        self.root_category_name = kwargs.get('root_category_name')
 
 class ItemCategoryNTiers(ItemCategory):
     brand_group_id: int = 0

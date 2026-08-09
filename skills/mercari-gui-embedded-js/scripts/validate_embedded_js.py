@@ -4,8 +4,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[4]
-sys.path.insert(0, str(ROOT))
+ROOT = Path(__file__).resolve().parents[3]
+if (ROOT / "mercari_gui.py").is_file():
+    sys.path.insert(0, str(ROOT))
+else:
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "mercari_gui.py").is_file():
+            ROOT = parent
+            sys.path.insert(0, str(ROOT))
+            break
+    else:
+        sys.path.insert(0, str(ROOT))
 
 import mercari_gui  # noqa: E402
 

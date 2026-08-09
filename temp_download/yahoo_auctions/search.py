@@ -7,6 +7,27 @@ from .models import YahooAuctionItem
 BASE_URL = 'https://auctions.yahoo.co.jp/search/search'
 
 
+def clean_search_keyword(keyword: str) -> str:
+    """Trim clutter so Yahoo matches the meaningful product name.
+
+    Yahoo search OR-matches tokens, so long item titles (e.g.
+    "JOJOVELLER (Complete Limited Edition) (Used)") pull in unrelated
+    listings matching just "Limited Edition" / "Used". When the keyword
+    contains parenthetical clauses or size separators, strip them, drop
+    pure-number tokens (sizes like 1/7), and keep only the first two
+    meaningful words. Clean short queries pass through unchanged.
+    """
+    if not keyword:
+        return keyword
+    if not re.search(r'[()/:;,]', keyword):
+        return keyword
+    k = re.sub(r'\([^)]*\)', ' ', keyword)
+    k = re.sub(r'[/\\]', ' ', k)
+    k = re.sub(r'[:;,."\'*~!?#]', ' ', k)
+    tokens = [t for t in k.split() if t]
+    return ' '.join(tokens[:2])
+
+
 def build_search_url(
     keyword: str,
     min_price: int = None,
@@ -165,7 +186,7 @@ def search_yahoo(
     limit: int = 20,
 ) -> list:
     url = build_search_url(
-        keyword=keyword,
+        keyword=clean_search_keyword(keyword),
         min_price=min_price,
         max_price=max_price,
         status=status,

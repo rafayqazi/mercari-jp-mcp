@@ -5,12 +5,14 @@ import os
 import io
 import requests as http_requests
 import openpyxl
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'temp_download', 'mercari-2.2.1'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'temp_download'))
 from mercari import search, getItemInfo, getShopProductInfo, ShopProductInfo, MercariSort, MercariOrder, MercariSearchStatus
 from yahoo_auctions import search_yahoo, get_item_detail, parse_search_results, build_search_url
-from ebay_search import search_ebay, EbayItem
+from ebay_search import search_ebay, get_ebay_item, EbayItem
+from ebay_search.search import _get_oauth_token as get_ebay_oauth_token
 
 app = Flask(__name__)
 
@@ -29,7 +31,7 @@ HTML_PAGE = u'''<!DOCTYPE html>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
   body { background: #f0f2f5; display: flex; justify-content: center; min-height: 100vh; }
-  .container { max-width: 1000px; width: 100%; padding: 24px 16px; }
+  .container { max-width: 1280px; width: 100%; padding: 24px 16px; }
   h1 { font-size: 24px; color: #ea352d; margin-bottom: 20px; display: flex; align-items: center; gap: 8px; }
   h1::before { content: "📱"; font-size: 24px; }
   .card { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 16px; }
@@ -107,7 +109,9 @@ HTML_PAGE = u'''<!DOCTYPE html>
   .bulk-result-group { margin-bottom: 16px; border: 1px solid #eee; border-radius: 10px; overflow: hidden; }
   .bulk-result-header { padding: 10px 14px; background: #f9f9f9; font-size: 14px; font-weight: 600; color: #333; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
   .bulk-result-header:hover { background: #f0f0f0; }
-  .bulk-result-header .count { font-size: 12px; font-weight: 400; color: #999; }
+  .bulk-result-header .keyword-serial { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; height: 26px; background: #ea352d; color: white; border-radius: 50%; font-size: 12px; font-weight: 700; margin-right: 8px; flex-shrink: 0; }
+  .bulk-result-header .keyword-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bulk-result-header .count { font-size: 12px; font-weight: 400; color: #999; flex-shrink: 0; margin-left: 12px; }
   .keyword-badge { font-size: 10px; font-weight: 600; color: #666; background: #f0f0f0; padding: 2px 8px; border-radius: 4px; display: inline-block; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.3px; }
   .bulk-result-body { padding: 8px 14px 14px; }
   .bulk-result-body .result-card { margin-bottom: 8px; }
@@ -118,6 +122,10 @@ HTML_PAGE = u'''<!DOCTYPE html>
   .bulk-result-body .result-card .result-name { font-size: 13px; }
   .dl-btn { padding: 8px 16px; background: #333; color: white; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; margin-top: 8px; }
   .dl-btn:hover { background: #555; }
+  .retry-btn { border: 1px solid #ea352d !important; color: #ea352d !important; background: #fff !important; cursor: pointer; font-size: 12px; padding: 6px 12px; border-radius: 6px; display: inline-flex; align-items: center; gap: 4px; }
+  .retry-btn:hover { background: #ea352d !important; color: #fff !important; }
+  .retry-btn.loading { opacity: 0.6; cursor: progress; }
+  .retry-row { margin-top: 10px; }
   .yahoo-result-card { display: flex; gap: 12px; padding: 12px; background: white; border: 1px solid #eee; border-radius: 10px; transition: box-shadow 0.2s; align-items: stretch; overflow: hidden; }
   .yahoo-result-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.1); }
   .yahoo-thumb { width: 90px; min-height: 90px; border-radius: 6px; overflow: hidden; flex-shrink: 0; background: #f5f5f5; }
@@ -138,14 +146,36 @@ HTML_PAGE = u'''<!DOCTYPE html>
   .yahoo-actions { display: flex; flex-direction: column; gap: 4px; flex-shrink: 0; justify-content: center; }
   .yahoo-actions .result-link { text-align: center; }
   .yahoo-thumb-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 28px; color: #ccc; }
-  .combined-grid { display: flex; gap: 16px; }
-  .combined-grid .combined-col { flex: 1; min-width: 0; width: 50%; }
+  .combined-filters { display: flex; flex-direction: column; gap: 14px; }
+  .combined-filter-section { background: #f9f9f9; border: 1px solid #eee; border-radius: 8px; padding: 12px 14px; }
+  .combined-filter-section h4 { font-size: 11px; font-weight: 700; color: #888; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.4px; }
+  .combined-filter-section.mercari h4 { color: #ea352d; }
+  .combined-filter-section.yahoo h4 { color: #222; }
+  .combined-filter-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; align-items: end; }
+  .combined-filter-grid .checkbox-row { display: flex; align-items: center; gap: 8px; min-height: 42px; }
+  .combined-filter-grid .checkbox-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; flex-shrink: 0; }
+  .combined-filter-grid .checkbox-row label { margin: 0; cursor: pointer; font-size: 12px; line-height: 1.3; }
+  .combined-grid { display: grid; gap: 16px; }
+  .combined-grid { grid-template-columns: 1fr 1fr; }
+  .combined-grid.has-ebay { grid-template-columns: 1fr 1fr 1fr; }
+  .combined-grid .combined-col { min-width: 0; }
   .combined-grid .combined-col h3 { font-size: 14px; color: #333; margin-bottom: 12px; padding-bottom: 6px; border-bottom: 2px solid #eee; }
   .combined-grid .combined-col h3.mercari-header { border-bottom-color: #ea352d; }
   .combined-grid .combined-col h3.yahoo-header { border-bottom-color: #222; }
-  .combined-grid .result-name, .combined-grid .yahoo-title { white-space: normal; overflow: visible; text-overflow: clip; word-break: break-word; line-height: 1.4; }
-  .combined-grid .result-actions, .combined-grid .yahoo-actions { flex-wrap: wrap; justify-content: flex-end; max-width: 130px; }
-  .combined-grid .result-actions .result-link, .combined-grid .yahoo-actions .result-link { margin-bottom: 4px; }
+  .combined-grid .combined-col h3.ebay-ref-header { border-bottom-color: #0064d2; }
+  .combined-ebay-ref { margin-bottom: 0; }
+  .combined-ebay-ref .ebay-title { white-space: normal; overflow: visible; text-overflow: clip; word-break: break-word; line-height: 1.4; font-size: 13px; }
+  .combined-ebay-link { font-size: 11px; color: #888; word-break: break-all; margin-bottom: 8px; }
+  .combined-grid .result-card, .combined-grid .yahoo-result-card, .combined-grid .ebay-result-card.combined-ebay-ref { flex-direction: column; align-items: stretch; gap: 10px; min-height: 340px; height: 340px; overflow: hidden; box-sizing: border-box; }
+  .combined-grid .result-thumb, .combined-grid .yahoo-thumb, .combined-grid .ebay-thumb { width: 100%; height: 140px; min-height: 140px; max-height: 140px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; background: #f5f5f5; border-radius: 8px; overflow: hidden; }
+  .combined-grid .result-thumb img, .combined-grid .yahoo-thumb img, .combined-grid .ebay-thumb img { width: 100%; height: 100%; object-fit: contain; object-position: center; display: block; }
+  .combined-grid .result-icon { width: 100%; height: 140px; flex-shrink: 0; }
+  .combined-grid .result-info, .combined-grid .yahoo-info, .combined-grid .ebay-info { flex: 1; min-height: 0; overflow: hidden; }
+  .combined-grid .result-name, .combined-grid .yahoo-title, .combined-grid .combined-ebay-ref .ebay-title { white-space: normal; overflow: hidden; text-overflow: ellipsis; word-break: break-word; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+  .combined-grid .combined-ebay-ref .ebay-meta { max-height: 40px; overflow: hidden; }
+  .combined-grid .result-actions, .combined-grid .yahoo-actions, .combined-grid .ebay-actions { flex-direction: row; flex-wrap: wrap; justify-content: flex-start; max-width: none; width: 100%; gap: 6px; flex-shrink: 0; margin-top: auto; }
+  .combined-grid .result-actions .result-link, .combined-grid .yahoo-actions .result-link, .combined-grid .ebay-actions .result-link { margin-bottom: 0; flex: 1; min-width: 70px; text-align: center; font-size: 11px; padding: 6px 8px; }
+  mark.kw-highlight { background: #fff176; color: inherit; padding: 0 2px; border-radius: 2px; font-weight: 600; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
   .combined-keyword-title { font-size: 13px; font-weight: 600; color: #555; margin: 12px 0 8px; padding: 6px 10px; background: #f5f5f5; border-radius: 6px; }
   .stock-card { display: flex; gap: 12px; padding: 12px 16px; background: white; border: 1px solid #eee; border-radius: 10px; align-items: center; margin-bottom: 8px; transition: box-shadow 0.2s; }
   .stock-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.1); }
@@ -179,6 +209,11 @@ HTML_PAGE = u'''<!DOCTYPE html>
   .ebay-badge.toprated { background: #fff3e0; color: #e65100; }
   .ebay-badge.auction { background: #e3f2fd; color: #1565c0; }
   .ebay-badge.bin { background: #f3e5f5; color: #7b1fa2; }
+  .ebay-badge.cond-new { background: #e8f5e9; color: #2e7d32; border: 1px solid #a5d6a7; font-size: 11px; padding: 2px 8px; }
+  .ebay-badge.cond-used { background: #fff3e0; color: #e65100; border: 1px solid #ffcc80; font-size: 11px; padding: 2px 8px; }
+  .ebay-badge.cond-parts { background: #ffebee; color: #c62828; border: 1px solid #ef9a9a; font-size: 11px; padding: 2px 8px; }
+  .ebay-badge.cond-refurb { background: #e3f2fd; color: #1565c0; border: 1px solid #90caf9; font-size: 11px; padding: 2px 8px; }
+  .ebay-badge.cond-other { background: #f3e5f5; color: #6a1b9a; border: 1px solid #ce93d8; font-size: 11px; padding: 2px 8px; }
   .ebay-actions { display: flex; flex-direction: column; gap: 4px; flex-shrink: 0; justify-content: center; }
   .ebay-actions .result-link { text-align: center; }
   .ebay-thumb-placeholder { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 28px; color: #ccc; }
@@ -189,7 +224,7 @@ HTML_PAGE = u'''<!DOCTYPE html>
   .settings-section .btn-save { padding: 8px 16px; background: #0064d2; color: white; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; font-weight: 500; }
   .settings-section .btn-save:hover { background: #0053b0; }
   .settings-section .status-msg { font-size: 12px; color: #2e7d32; display: none; }
-  @media (max-width: 768px) { .combined-grid { flex-direction: column; } .combined-grid .combined-col { width: 100%; } }
+  @media (max-width: 900px) { .combined-grid, .combined-grid.has-ebay { grid-template-columns: 1fr; } }
   @media (max-width: 600px) { .form-row { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -315,6 +350,10 @@ HTML_PAGE = u'''<!DOCTYPE html>
         <div class="form-group" style="flex:1;min-width:80px;">
           <label for="bulkMaxReviews">Max Reviews</label>
           <input type="number" id="bulkMaxReviews" placeholder="Any" min="0">
+        </div>
+        <div class="form-group" style="flex:0;min-width:auto;display:flex;align-items:center;gap:6px;margin-top:18px;flex-direction:row;">
+          <input type="checkbox" id="bulkExcludeAuctions" style="width:16px;height:16px;cursor:pointer;">
+          <label for="bulkExcludeAuctions" style="margin:0;cursor:pointer;font-size:12px;white-space:nowrap;">Exclude Mercari Auctions</label>
         </div>
         <button class="btn-search" id="bulkBtn" onclick="doBulkSearch()" style="flex:1;min-width:150px;margin-top:18px;">
           <span class="spinner"></span>
@@ -478,58 +517,69 @@ HTML_PAGE = u'''<!DOCTYPE html>
       </div>
       <div style="text-align:center;color:#999;font-size:12px;">&mdash; OR &mdash;</div>
       <textarea id="combinedKeywords" placeholder="Paste keywords here, one per line&#10;e.g.&#10;iPhone 15 Pro&#10;Canon PowerShot&#10;Roland SC-88"></textarea>
-      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
-        <div class="form-group" style="flex:1;min-width:100px;">
-          <label for="combinedLimit">Per Keyword</label>
+      <label for="combinedEbayLinks" style="display:block;font-size:12px;color:#666;margin:12px 0 6px;font-weight:500;">eBay Reference Links <span style="font-weight:400;color:#999;">(optional, one per line — same order as keywords)</span></label>
+      <textarea id="combinedEbayLinks" placeholder="Paste eBay item links here, one per line (line 1 = keyword 1)&#10;e.g.&#10;https://www.ebay.com/itm/134766184800&#10;https://www.ebay.com/itm/134766491241" style="min-height:90px;"></textarea>
+      <div class="combined-filters">
+        <div class="form-group" style="max-width:160px;">
+          <label for="combinedLimit">Results Per Keyword</label>
           <select id="combinedLimit"><option value="1">1</option><option value="2">2</option><option value="3" selected>3</option><option value="5">5</option></select>
         </div>
-        <div class="form-group" style="flex:1;min-width:120px;">
-          <label for="combinedStatus">Mercari Status</label>
-          <select id="combinedStatus"><option value="all">All</option><option value="available">Available</option><option value="sold">Sold Out</option></select>
+        <div class="combined-filter-section mercari">
+          <h4>Mercari Filters</h4>
+          <div class="combined-filter-grid">
+            <div class="form-group">
+              <label for="combinedStatus">Status</label>
+              <select id="combinedStatus"><option value="all">All</option><option value="available">Available</option><option value="sold">Sold Out</option></select>
+            </div>
+            <div class="form-group">
+              <label for="combinedCondition">Condition</label>
+              <select id="combinedCondition">
+                <option value="">All</option>
+                <option value="新品、未使用">New / Unused</option>
+                <option value="未使用に近い">Like New</option>
+                <option value="目立った傷や汚れなし">Excellent (No Scratches)</option>
+                <option value="やや傷や汚れあり">Good (Slight Scratches)</option>
+                <option value="傷や汚れあり">Fair (Scratches/Dirt)</option>
+                <option value="全体的に状態が悪い">Poor</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="combinedMinReviews">Min Reviews</label>
+              <input type="number" id="combinedMinReviews" placeholder="e.g. 50" min="0">
+            </div>
+            <div class="checkbox-row">
+              <input type="checkbox" id="combinedExcludeAuctions">
+              <label for="combinedExcludeAuctions">Exclude Mercari Auctions</label>
+            </div>
+          </div>
         </div>
-        <div class="form-group" style="flex:1;min-width:120px;">
-          <label for="combinedCondition">Mercari Condition</label>
-          <select id="combinedCondition">
-            <option value="">All</option>
-            <option value="新品、未使用">New / Unused</option>
-            <option value="未使用に近い">Like New</option>
-            <option value="目立った傷や汚れなし">Excellent (No Scratches)</option>
-            <option value="やや傷や汚れあり">Good (Slight Scratches)</option>
-            <option value="傷や汚れあり">Fair (Scratches/Dirt)</option>
-            <option value="全体的に状態が悪い">Poor</option>
-          </select>
+        <div class="combined-filter-section yahoo">
+          <h4>Yahoo Auctions Filters</h4>
+          <div class="combined-filter-grid">
+            <div class="form-group">
+              <label for="combinedYahooStatus">Status</label>
+              <select id="combinedYahooStatus"><option value="live">Live Auctions</option><option value="sold">Sold / Ended</option></select>
+            </div>
+            <div class="form-group">
+              <label for="combinedYahooCondition">Condition</label>
+              <select id="combinedYahooCondition">
+                <option value="">All</option>
+                <option value="1">Unused</option>
+                <option value="2">Used</option>
+                <option value="3">Near Unused</option>
+                <option value="4">No Scratches/Dirt</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="combinedYahooBIN">BIN Filter</label>
+              <select id="combinedYahooBIN">
+                <option value="all">All Items</option>
+                <option value="bin_only">BIN Only</option>
+              </select>
+            </div>
+          </div>
         </div>
-        <div class="form-group" style="flex:1;min-width:100px;">
-          <label for="combinedMinReviews">Min Reviews</label>
-          <input type="number" id="combinedMinReviews" placeholder="e.g. 50" min="0">
-        </div>
-        <div class="form-group" style="flex:0;min-width:auto;display:flex;align-items:center;gap:6px;margin-top:18px;flex-direction:row;">
-          <input type="checkbox" id="combinedExcludeAuctions" style="width:16px;height:16px;cursor:pointer;">
-          <label for="combinedExcludeAuctions" style="margin:0;cursor:pointer;font-size:12px;white-space:nowrap;">Exclude Mercari Auctions</label>
-        </div>
-        <div style="width:1px;height:36px;background:#ddd;align-self:center;margin-top:18px;"></div>
-        <div class="form-group" style="flex:1;min-width:100px;">
-          <label for="combinedYahooStatus">Yahoo Status</label>
-          <select id="combinedYahooStatus"><option value="live">Live Auctions</option><option value="sold">Sold / Ended</option></select>
-        </div>
-        <div class="form-group" style="flex:1;min-width:100px;">
-          <label for="combinedYahooCondition">Yahoo Condition</label>
-          <select id="combinedYahooCondition">
-            <option value="">All</option>
-            <option value="1">Unused</option>
-            <option value="2">Used</option>
-            <option value="3">Near Unused</option>
-            <option value="4">No Scratches/Dirt</option>
-          </select>
-        </div>
-        <div class="form-group" style="flex:1;min-width:100px;">
-          <label for="combinedYahooBIN">BIN Filter</label>
-          <select id="combinedYahooBIN">
-            <option value="all">All Items</option>
-            <option value="bin_only">BIN Only</option>
-          </select>
-        </div>
-        <button class="btn-search" id="combinedBtn" onclick="doCombinedBulkSearch()" style="flex:1;min-width:150px;margin-top:18px;">
+        <button class="btn-search" id="combinedBtn" onclick="doCombinedBulkSearch()">
           <span class="spinner"></span>
           <span class="btn-text">Search Both</span>
         </button>
@@ -755,7 +805,7 @@ HTML_PAGE = u'''<!DOCTYPE html>
   <div id="stockResults">
     <div class="status"><div class="emoji">&#x1F50D;</div><p>Enter keywords &amp; product links and click Check Stock</p></div>
   </div>
-  <button class="dl-btn" id="stockDlBtn" onclick="downloadStockCSV()" style="display:none;margin-top:8px;">Download CSV</button>
+  <button class="dl-btn" id="stockDlBtn" onclick="downloadStockCSV()" style="margin-top:8px;">Download CSV</button>
 </div>
 </div>
 <div class="modal-overlay" id="modalOverlay" onclick="closeModal(event)">
@@ -837,6 +887,17 @@ function toJpyDisplay(usd) {
   return '&nbsp;≈&nbsp;&yen;' + jpy.toLocaleString();
 }
 
+function getConditionBadge(item) {
+  const c = (item.condition || '').toLowerCase();
+  if (!c) return '';
+  let cls = 'cond-other';
+  if (c.indexOf('new') !== -1 || c.indexOf('open box') !== -1) cls = 'cond-new';
+  else if (c.indexOf('refurb') !== -1) cls = 'cond-refurb';
+  else if (c.indexOf('parts') !== -1 || c.indexOf('not working') !== -1 || c.indexOf('broken') !== -1 || c.indexOf('junk') !== -1) cls = 'cond-parts';
+  else if (c.indexOf('used') !== -1 || c.indexOf('pre-owned') !== -1 || c.indexOf('good') !== -1 || c.indexOf('acceptable') !== -1 || c.indexOf('ungraded') !== -1) cls = 'cond-used';
+  return '<span class="ebay-badge '+cls+'">'+escapeHtml(item.condition)+'</span>';
+}
+
 function handleImageError(img) {
   if (img && img.parentElement) {
     img.parentElement.className = 'result-icon';
@@ -883,6 +944,40 @@ function timeAgo(ts) {
 function escapeHtml(str) { 
   const d = document.createElement('div'); d.textContent = str; return d.innerHTML; 
 }
+function escapeRegex(str) {
+  return String(str).replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');
+}
+function isSignificantKeywordTerm(term) {
+  if (!term) return false;
+  if (/[\u3000-\u9fff\uf900-\ufaff]/.test(term)) return term.length >= 1;
+  return term.length >= 2;
+}
+function getKeywordTerms(keyword) {
+  const kw = String(keyword || '').trim();
+  if (!kw) return [];
+  const terms = [];
+  if (isSignificantKeywordTerm(kw)) terms.push(kw);
+  kw.split(/[\s\-/,+|]+/).forEach(function(part) {
+    part = part.trim();
+    if (isSignificantKeywordTerm(part)) terms.push(part);
+  });
+  const seen = {};
+  return terms.filter(function(term) {
+    const key = term.toLowerCase();
+    if (seen[key]) return false;
+    seen[key] = true;
+    return true;
+  }).sort(function(a, b) { return b.length - a.length; });
+}
+function highlightKeyword(text, keyword) {
+  if (!text) return '';
+  if (!keyword || !String(keyword).trim()) return escapeHtml(text);
+  const safe = escapeHtml(String(text));
+  const terms = getKeywordTerms(keyword);
+  if (!terms.length) return safe;
+  const re = new RegExp('(' + terms.map(escapeRegex).join('|') + ')', 'gi');
+  return safe.replace(re, '<mark class="kw-highlight">$1</mark>');
+}
 document.getElementById('keyword').addEventListener('keydown', function(e) {
   if (e.key === 'Enter') doSearch();
 });
@@ -901,9 +996,50 @@ function switchTab(name) {
 function searchEbayForKeyword(el) {
   const kw = el.getAttribute('data-kw');
   if (!kw) return;
-  document.getElementById('ebayKeyword').value = kw;
-  switchTab('ebay');
-  setTimeout(doEbaySearch, 100);
+  const creds = getEbayCredentials();
+  if (!creds.appId || !creds.certId) {
+    showError('Please set your eBay App ID and Cert ID in the settings bar above');
+    return;
+  }
+  const overlay = document.getElementById('modalOverlay');
+  const body = document.getElementById('modalBody');
+  overlay.classList.add('active');
+  body.innerHTML = '<div class="modal-loading">Searching eBay for "'+escapeHtml(kw)+'"...</div>';
+  const params = new URLSearchParams({
+    keyword: kw,
+    app_id: creds.appId,
+    cert_id: creds.certId,
+    min_price: document.getElementById('ebayMinPrice').value || '',
+    max_price: document.getElementById('ebayMaxPrice').value || '',
+    condition: document.getElementById('ebayCondition').value,
+    sort: document.getElementById('ebaySort').value,
+    global_id: document.getElementById('ebaySite').value,
+    item_location: document.getElementById('ebayItemLocation').value,
+    bin_only: document.getElementById('ebayBINOnly').checked ? '1' : '',
+    limit: document.getElementById('ebayLimit').value || '20'
+  });
+  fetch('/api/ebay-search?'+params.toString())
+    .then(function(resp) {
+      if (!resp.ok) return resp.json().then(function(e) { throw new Error(e.error || 'Search failed'); });
+      return resp.json();
+    })
+    .then(function(data) {
+      const items = data.items || [];
+      if (!items.length) {
+        body.innerHTML = '<div style="text-align:center;padding:16px;"><div style="font-size:48px;">&#x1F622;</div><p>No results found for "'+escapeHtml(kw)+'"</p></div>';
+        return;
+      }
+      let html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;padding-right:28px;">'
+        + '<h3 style="font-size:16px;color:#333;margin:0;">eBay: '+escapeHtml(kw)+'</h3>'
+        + '<span style="font-size:12px;color:#888;">'+items.length+' item(s)</span></div>'
+        + '<div style="max-height:60vh;overflow-y:auto;padding-right:4px;">';
+      for (const item of items) html += buildEbayResultCard(item);
+      html += '</div>';
+      body.innerHTML = html;
+    })
+    .catch(function(e) {
+      body.innerHTML = '<div class="modal-loading" style="color:#d42c25;">Error: '+e.message+'</div>';
+    });
 }
 async function handleFile(e) {
   const file = e.target.files[0];
@@ -979,24 +1115,40 @@ async function doBulkSearch() {
   const container = document.getElementById('bulkResults');
   container.innerHTML = '<div class="count-badge streaming">Searching... 0/'+total+'</div><div id="mercariBulkGroups"></div>';
   window._bulkCSV = [];
+  window._csvSeen = {};
   let doneCount = 0;
+  let foundCount = 0;
+  let notFoundCount = 0;
+  let errCount = 0;
+  const cfgBody = {
+    keywords: keywords,
+    per_keyword: parseInt(document.getElementById('bulkLimit').value) || 3,
+    status_filter: document.getElementById('bulkStatus').value,
+    condition: document.getElementById('bulkCondition').value,
+    min_reviews: parseInt(document.getElementById('bulkMinReviews').value) || '',
+    max_reviews: parseInt(document.getElementById('bulkMaxReviews').value) || '',
+    exclude_auctions: document.getElementById('bulkExcludeAuctions').checked ? '1' : ''
+  };
+  window._retryBulkConfigs = window._retryBulkConfigs || {};
+  window._retryBulkConfigs.mercariBulk = {url: '/api/bulk-search', body: cfgBody};
   try {
-    await streamBulkSearch('/api/bulk-search', {
-      keywords: keywords,
-      per_keyword: parseInt(document.getElementById('bulkLimit').value) || 3,
-      status_filter: document.getElementById('bulkStatus').value,
-      condition: document.getElementById('bulkCondition').value,
-      min_reviews: parseInt(document.getElementById('bulkMinReviews').value) || '',
-      max_reviews: parseInt(document.getElementById('bulkMaxReviews').value) || '',
-      exclude_auctions: document.getElementById('bulkExcludeAuctions').checked ? '1' : ''
-    }, function(data) {
-      appendBulkResult(data.keyword, data.items);
+    await streamBulkSearch('/api/bulk-search', cfgBody, function(data) {
+      appendBulkResult(data.keyword, data.items, data.keyword_error);
       doneCount++;
+      if (data.keyword_error) errCount++;
+      else if (data.items && data.items.length) foundCount++;
+      else notFoundCount++;
       const badge = container.querySelector('.count-badge');
       if (badge) badge.innerHTML = 'Searching... '+doneCount+'/'+total;
     }, function() {
       const badge = container.querySelector('.count-badge');
-      if (badge) badge.innerHTML = 'Results for <strong>'+doneCount+'</strong> keyword(s)';
+      if (badge) {
+        let msg = 'Results for <strong>'+doneCount+'</strong> keyword(s)';
+        msg += ' &middot; <strong>'+foundCount+'</strong> found';
+        if (notFoundCount) msg += ' &middot; <strong>'+notFoundCount+'</strong> not found';
+        if (errCount) msg += ' &middot; <strong>'+errCount+'</strong> error(s)';
+        badge.innerHTML = msg;
+      }
       const groups = document.getElementById('mercariBulkGroups');
       if (groups) {
         const dl = document.createElement('button');
@@ -1008,18 +1160,29 @@ async function doBulkSearch() {
   } catch(e) { showError(e.message); }
   finally { btn.classList.remove('loading'); btn.disabled = false; }
 }
-function appendBulkResult(kw, items) {
-  const groups = document.getElementById('mercariBulkGroups');
-  if (!groups) return;
-  if (!items || !items.length) return;
-  let html = '<div class="bulk-result-group"><div class="bulk-result-header" onclick="toggleBulkGroup(this)">'
+var _bulkGroupSeq = 0;
+function nextGroupId() { return 'bg' + (++_bulkGroupSeq); }
+
+function buildBulkResultGroup(kw, items, keywordError, gid) {
+  if (!items || !items.length) {
+    const failed = !!keywordError;
+    const msg = failed ? 'Search failed: '+escapeHtml(keywordError) : 'Result not found';
+    const bodyMsg = failed ? 'Could not fetch results for this keyword. Error: '+escapeHtml(keywordError)+'. Try a re-search below or search it manually.' : 'No items found for this keyword. Try a re-search below or search it manually.';
+    return '<div class="bulk-result-group" id="'+gid+'">'
+      + '<div class="bulk-result-header" onclick="toggleBulkGroup(this)" style="'+(failed?'background:#fff0f0;color:#d42c25;':'background:#f7f7f7;')+'">'
+      + escapeHtml(kw) + ' <span class="count">'+msg+'</span></div>'
+      + '<div class="bulk-result-body"><div class="status" style="padding:10px;font-size:12px;text-align:left;color:'+(failed?'#d42c25':'#999')+';">'+(failed?'&#x26A0; ':'&#x1F622; ')+bodyMsg+'</div>'
+      + '<div class="retry-row"><button type="button" class="retry-btn" data-tab="mercariBulk" data-group="'+gid+'" data-kw="'+escapeHtml(kw)+'">&#x21BB; Re-search keyword</button></div>'
+      + '</div></div>';
+  }
+  let html = '<div class="bulk-result-group" id="'+gid+'"><div class="bulk-result-header" onclick="toggleBulkGroup(this)">'
     + escapeHtml(kw) + ' <span class="count">'+items.length+' item(s)</span></div>'
     + '<div class="bulk-result-body"><div class="results">';
   for (const item of items) {
     const name = item.name_en || item.name;
     html += '<div class="result-card">'
       + (item.image ? '<div class="result-thumb"><img src="'+escapeHtml(item.image)+'" alt="" loading="lazy" onerror="handleImageError(this)"></div>' : '<div class="result-icon">&#x1F4E6;</div>')
-      + '<div class="result-info"><div class="result-name">'+escapeHtml(name)+'</div>'
+      + '<div class="result-info"><div class="result-name">'+highlightKeyword(name, kw)+'</div>'
       + '<div class="result-price">&yen;'+Number(item.price).toLocaleString()+' <span>JPY</span></div>'
     + (item.updated ? '<div class="result-updated">Updated: '+timeAgo(item.updated)+'</div>' : '')
     + (item.condition_en ? '<div class="result-condition">'+escapeHtml(item.condition_en)+'</div>' : '')
@@ -1032,10 +1195,20 @@ function appendBulkResult(kw, items) {
       + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View</a>'
       + '<button class="result-link ebay-search-btn" data-kw="'+escapeHtml(name)+'" onclick="searchEbayForKeyword(this)">Search eBay</button>'
       + '</div></div>';
-    window._bulkCSV.push({keyword: kw, name: name, price: item.price, url: item.url, status: item.status, condition_en: item.condition_en, seller_name: item.seller_name, seller_reviews: item.seller_reviews, updated: item.updated});
+    const key = 'm|'+kw+'|'+(item.url||'')+'|'+item.price;
+    if (!window._csvSeen[key]) {
+      window._csvSeen[key] = 1;
+      window._bulkCSV.push({keyword: kw, name: name, price: item.price, url: item.url, status: item.status, condition_en: item.condition_en, seller_name: item.seller_name, seller_reviews: item.seller_reviews, updated: item.updated});
+    }
   }
   html += '</div></div></div>';
-  groups.insertAdjacentHTML('beforeend', html);
+  return html;
+}
+
+function appendBulkResult(kw, items, keywordError) {
+  const groups = document.getElementById('mercariBulkGroups');
+  if (!groups) return;
+  groups.insertAdjacentHTML('beforeend', buildBulkResultGroup(kw, items, keywordError, nextGroupId()));
 }
 
 function downloadCSV() {
@@ -1207,24 +1380,39 @@ async function doYahooBulkSearch() {
   container.innerHTML = '<div class="count-badge streaming">Searching... 0/'+total+'</div><div id="yahooBulkGroups"></div>';
   window._yahooBulkCSV = [];
   let doneCount = 0;
+  let foundCount = 0;
+  let notFoundCount = 0;
+  let errCount = 0;
+  const cfgBody = {
+    keywords: keywords,
+    per_keyword: parseInt(document.getElementById('yahooBulkLimit').value) || 3,
+    status: document.getElementById('yahooBulkStatus').value,
+    condition: document.getElementById('yahooBulkCondition').value,
+    sort: document.getElementById('yahooBulkSort').value,
+    bin_filter: document.getElementById('yahooBulkBIN').value,
+    min_price: document.getElementById('yahooBulkMinPrice').value || '',
+    max_price: document.getElementById('yahooBulkMaxPrice').value || ''
+  };
+  window._retryBulkConfigs = window._retryBulkConfigs || {};
+  window._retryBulkConfigs.yahooBulk = {url: '/api/yahoo-bulk-search', body: cfgBody};
   try {
-    await streamBulkSearch('/api/yahoo-bulk-search', {
-      keywords: keywords,
-      per_keyword: parseInt(document.getElementById('yahooBulkLimit').value) || 3,
-      status: document.getElementById('yahooBulkStatus').value,
-      condition: document.getElementById('yahooBulkCondition').value,
-      sort: document.getElementById('yahooBulkSort').value,
-      bin_filter: document.getElementById('yahooBulkBIN').value,
-      min_price: document.getElementById('yahooBulkMinPrice').value || '',
-      max_price: document.getElementById('yahooBulkMaxPrice').value || ''
-    }, function(data) {
-      appendYahooBulkResult(data.keyword, data.items);
+    await streamBulkSearch('/api/yahoo-bulk-search', cfgBody, function(data) {
+      appendYahooBulkResult(data.keyword, data.items, data.keyword_error);
       doneCount++;
+      if (data.keyword_error) errCount++;
+      else if (data.items && data.items.length) foundCount++;
+      else notFoundCount++;
       const badge = container.querySelector('.count-badge');
       if (badge) badge.innerHTML = 'Searching... '+doneCount+'/'+total;
     }, function() {
       const badge = container.querySelector('.count-badge');
-      if (badge) badge.innerHTML = 'Results for <strong>'+doneCount+'</strong> keyword(s)';
+      if (badge) {
+        let msg = 'Results for <strong>'+doneCount+'</strong> keyword(s)';
+        msg += ' &middot; <strong>'+foundCount+'</strong> found';
+        if (notFoundCount) msg += ' &middot; <strong>'+notFoundCount+'</strong> not found';
+        if (errCount) msg += ' &middot; <strong>'+errCount+'</strong> error(s)';
+        badge.innerHTML = msg;
+      }
       const groups = document.getElementById('yahooBulkGroups');
       if (groups) {
         const dl = document.createElement('button');
@@ -1237,11 +1425,19 @@ async function doYahooBulkSearch() {
   finally { btn.classList.remove('loading'); btn.disabled = false; }
 }
 
-function appendYahooBulkResult(kw, items) {
-  const groups = document.getElementById('yahooBulkGroups');
-  if (!groups) return;
-  if (!items || !items.length) return;
-  let html = '<div class="bulk-result-group"><div class="bulk-result-header" onclick="toggleBulkGroup(this)">'
+function buildYahooBulkGroup(kw, items, keywordError, gid) {
+  if (!items || !items.length) {
+    const failed = !!keywordError;
+    const msg = failed ? 'Search failed: '+escapeHtml(keywordError) : 'Result not found';
+    const bodyMsg = failed ? 'Could not fetch results for this keyword. Error: '+escapeHtml(keywordError)+'. Try a re-search.' : 'No items found for this keyword. Try a re-search.';
+    return '<div class="bulk-result-group" id="'+gid+'">'
+      + '<div class="bulk-result-header" onclick="toggleBulkGroup(this)" style="'+(failed?'background:#fff0f0;color:#d42c25;':'background:#f7f7f7;')+'">'
+      + escapeHtml(kw) + ' <span class="count">'+msg+'</span></div>'
+      + '<div class="bulk-result-body"><div class="status" style="padding:10px;font-size:12px;text-align:left;color:'+(failed?'#d42c25':'#999')+';">'+(failed?'&#x26A0; ':'&#x1F622; ')+bodyMsg+'</div>'
+      + '<div class="retry-row"><button type="button" class="retry-btn" data-tab="yahooBulk" data-group="'+gid+'" data-kw="'+escapeHtml(kw)+'">&#x21BB; Re-search keyword</button></div>'
+      + '</div></div>';
+  }
+  let html = '<div class="bulk-result-group" id="'+gid+'"><div class="bulk-result-header" onclick="toggleBulkGroup(this)">'
     + escapeHtml(kw) + ' <span class="count">'+items.length+' item(s)</span></div>'
     + '<div class="bulk-result-body"><div class="results">';
   for (const item of items) {
@@ -1272,10 +1468,20 @@ function appendYahooBulkResult(kw, items) {
       + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View &rarr;</a>'
       + '</div>'
       + '</div>';
-    window._yahooBulkCSV.push({keyword: kw, title: item.title, price: item.price, buy_now_price: item.buy_now_price, bid_count: item.bid_count, time_remaining: item.time_remaining, seller: item.seller_name || item.seller_id, status: item.status, free_shipping: item.free_shipping, url: item.url});
+    const key = 'y|'+kw+'|'+(item.url||'')+'|'+item.price;
+    if (!window._csvSeen[key]) {
+      window._csvSeen[key] = 1;
+      window._yahooBulkCSV.push({keyword: kw, title: item.title, price: item.price, buy_now_price: item.buy_now_price, bid_count: item.bid_count, time_remaining: item.time_remaining, seller: item.seller_name || item.seller_id, status: item.status, free_shipping: item.free_shipping, url: item.url});
+    }
   }
   html += '</div></div></div>';
-  groups.insertAdjacentHTML('beforeend', html);
+  return html;
+}
+
+function appendYahooBulkResult(kw, items, keywordError) {
+  const groups = document.getElementById('yahooBulkGroups');
+  if (!groups) return;
+  groups.insertAdjacentHTML('beforeend', buildYahooBulkGroup(kw, items, keywordError, nextGroupId()));
 }
 
 function downloadYahooBulkCSV() {
@@ -1291,11 +1497,23 @@ function downloadYahooBulkCSV() {
 
 // Combined Mercari + Yahoo Bulk Search
 document.getElementById('combinedKeywords').addEventListener('input', updateCombinedCount);
+document.getElementById('combinedEbayLinks').addEventListener('input', updateCombinedCount);
+
+function parseCombinedEbayLinks() {
+  const v = document.getElementById('combinedEbayLinks').value.trim();
+  return v ? v.split('\\n').map(function(l){ return l.trim(); }).filter(function(l){ return l; }) : [];
+}
 
 function updateCombinedCount() {
   const v = document.getElementById('combinedKeywords').value.trim();
   const n = v ? v.split('\\n').filter(function(l){ return l.trim(); }).length : 0;
-  document.getElementById('combinedCount').textContent = n ? n+' keyword(s) loaded' : '';
+  const links = parseCombinedEbayLinks();
+  let msg = n ? n+' keyword(s) loaded' : '';
+  if (links.length) {
+    msg += (msg ? ' · ' : '') + links.length+' eBay link(s)';
+    if (n && links.length !== n) msg += ' <span style="color:#d42c25;">(must match keyword count)</span>';
+  }
+  document.getElementById('combinedCount').innerHTML = msg;
 }
 
 async function handleCombinedFile(e) {
@@ -1327,52 +1545,99 @@ async function doCombinedBulkSearch() {
   const keywords = text.split('\\n').map(function(l){ return l.trim(); }).filter(function(l){ return l; });
   if (!keywords.length) { showError('No valid keywords found'); return; }
   if (keywords.length > 50) { showError('Maximum 50 keywords allowed'); return; }
+  const ebayLinks = parseCombinedEbayLinks();
+  if (ebayLinks.length && ebayLinks.length !== keywords.length) {
+    showError('eBay links count ('+ebayLinks.length+') must match keywords count ('+keywords.length+') — one link per line, same order');
+    return;
+  }
+  const creds = getEbayCredentials();
+  if (ebayLinks.length && (!creds.appId || !creds.certId)) {
+    showError('Please set your eBay App ID and Cert ID in the settings bar to fetch reference items');
+    return;
+  }
   btn.classList.add('loading'); btn.disabled = true;
   const total = keywords.length;
   const container = document.getElementById('combinedResults');
+  const showEbayRef = ebayLinks.length > 0;
   container.innerHTML = '<div class="count-badge streaming">Searching... 0/'+total+'</div><div id="combinedGroups"></div>';
   let doneCount = 0;
-  try {
-    await streamBulkSearch('/api/combined-bulk-search', {
-      keywords: keywords,
-      per_keyword: parseInt(document.getElementById('combinedLimit').value) || 3,
-      mercari_status: document.getElementById('combinedStatus').value,
+  let foundCount = 0;
+  let notFoundCount = 0;
+  let errCount = 0;
+  const cfgBody = {
+    keywords: keywords,
+    per_keyword: parseInt(document.getElementById('combinedLimit').value) || 3,
+    mercari_status: document.getElementById('combinedStatus').value,
       mercari_condition: document.getElementById('combinedCondition').value,
       mercari_min_reviews: parseInt(document.getElementById('combinedMinReviews').value) || 0,
       mercari_exclude_auctions: document.getElementById('combinedExcludeAuctions').checked ? '1' : '',
       yahoo_status: document.getElementById('combinedYahooStatus').value,
       yahoo_condition: document.getElementById('combinedYahooCondition').value,
-      yahoo_bin_filter: document.getElementById('combinedYahooBIN').value
-    }, function(data) {
-      appendCombinedResult(data.keyword, data.mercari_items || [], data.yahoo_items || []);
+      yahoo_bin_filter: document.getElementById('combinedYahooBIN').value,
+      ebay_links: ebayLinks,
+      app_id: creds.appId || '',
+      cert_id: creds.certId || ''
+    };
+  window._retryBulkConfigs = window._retryBulkConfigs || {};
+  window._retryBulkConfigs.combinedBulk = {url: '/api/combined-bulk-search', body: cfgBody, showEbayRef: showEbayRef};
+  let combinedSerial = 0;
+  try {
+    await streamBulkSearch('/api/combined-bulk-search', cfgBody, function(data) {
+      combinedSerial++;
+      appendCombinedBulkResult(data.keyword, data.mercari_items || [], data.yahoo_items || [], data.mercari_error, data.yahoo_error, data.ebay_item, data.ebay_error, data.ebay_link, showEbayRef, combinedSerial);
       doneCount++;
+      if (data.mercari_error || data.yahoo_error) errCount++;
+      else if ((data.mercari_items && data.mercari_items.length) || (data.yahoo_items && data.yahoo_items.length)) foundCount++;
+      else notFoundCount++;
       const badge = container.querySelector('.count-badge');
       if (badge) badge.innerHTML = 'Searching... '+doneCount+'/'+total;
     }, function() {
       const badge = container.querySelector('.count-badge');
-      if (badge) badge.innerHTML = 'Results for <strong>'+doneCount+'</strong> keyword(s)';
+      if (badge) {
+        let msg = 'Results for <strong>'+doneCount+'</strong> keyword(s)';
+        msg += ' &middot; <strong>'+foundCount+'</strong> found';
+        if (notFoundCount) msg += ' &middot; <strong>'+notFoundCount+'</strong> not found';
+        if (errCount) msg += ' &middot; <strong>'+errCount+'</strong> error(s)';
+        badge.innerHTML = msg;
+      }
     });
   } catch(e) { showError(e.message); }
   finally { btn.classList.remove('loading'); btn.disabled = false; }
 }
 
-function appendCombinedResult(kw, mercariItems, yahooItems) {
-  const groups = document.getElementById('combinedGroups');
-  if (!groups) return;
-  if (!mercariItems.length && !yahooItems.length) return;
+function buildCombinedEbayRef(item, err, link, showCol, kw) {
+  if (!showCol) return '';
+  let html = '</div><div class="combined-col"><h3 class="ebay-ref-header">&#x1F4E6; eBay Reference</h3>';
+  if (link) html += '<div class="combined-ebay-link">'+escapeHtml(link)+'</div>';
+  if (err) {
+    html += '<div class="status" style="padding:12px;font-size:12px;color:#d42c25;text-align:left;">&#x26A0; '+escapeHtml(err)+'</div>';
+  } else if (item) {
+    html += buildEbayResultCard(item, kw).replace('class="ebay-result-card"', 'class="ebay-result-card combined-ebay-ref"');
+  } else {
+    html += '<div class="status" style="padding:16px;font-size:12px;">No eBay reference link</div>';
+  }
+  html += '</div>';
+  return html;
+}
 
-  let html = '<div class="bulk-result-group">'
+function buildCombinedGroup(kw, mercariItems, yahooItems, mErr, yErr, gid, ebayItem, ebayErr, ebayLink, showEbayRef, serial) {
+  const gridClass = showEbayRef ? 'combined-grid has-ebay' : 'combined-grid';
+  const serialHtml = serial ? '<span class="keyword-serial">'+serial+'</span>' : '';
+  let html = '<div class="bulk-result-group" id="'+gid+'"'+(serial ? ' data-serial="'+serial+'"' : '')+'>'
     + '<div class="bulk-result-header" onclick="toggleBulkGroup(this)">'
-    + escapeHtml(kw) + ' <span class="count">Mercari: '+mercariItems.length+' &middot; Yahoo: '+yahooItems.length+'</span></div>'
-    + '<div class="bulk-result-body"><div class="combined-grid">'
+    + '<span class="keyword-label">'+serialHtml+escapeHtml(kw)+'</span>'
+    + '<span class="count">Mercari: '+mercariItems.length+' &middot; Yahoo: '+yahooItems.length+(showEbayRef ? ' &middot; eBay ref' : '')+'</span></div>'
+    + '<div class="bulk-result-body"><div class="'+gridClass+'">'
     + '<div class="combined-col"><h3 class="mercari-header">&#x1F4E6; Mercari</h3>';
 
-  if (mercariItems.length) {
+  if (mErr) {
+    html += '<div class="status" style="padding:12px;font-size:12px;color:#d42c25;text-align:left;">&#x26A0; Mercari search failed: '+escapeHtml(mErr)+'</div>';
+  } else if (mercariItems.length) {
     for (const item of mercariItems) {
       const name = item.name_en || item.name;
-      html += '<div class="result-card" style="margin-bottom:8px;">'
+      html += '<div class="result-card combined-item-card" style="margin-bottom:8px;">'
         + (item.image ? '<div class="result-thumb"><img src="'+escapeHtml(item.image)+'" alt="" loading="lazy" onerror="handleImageError(this)"></div>' : '<div class="result-icon">&#x1F4E6;</div>')
-        + '<div class="result-info"><div class="result-name">'+escapeHtml(name)+'</div>'
+        + '<div class="result-info"><div class="result-name">'+highlightKeyword(name, kw)+'</div>'
         + '<div class="result-price">&yen;'+Number(item.price).toLocaleString()+' <span>JPY</span></div>'
         + (item.condition_en ? '<div class="result-condition">'+escapeHtml(item.condition_en)+'</div>' : '')
         + (item.seller_name ? '<div class="result-seller">'+escapeHtml(item.seller_name)+' ('+item.seller_reviews+' reviews)</div>' : '')
@@ -1385,23 +1650,25 @@ function appendCombinedResult(kw, mercariItems, yahooItems) {
         + '</div></div>';
     }
   } else {
-    html += '<div class="status" style="padding:16px;font-size:12px;">&#x1F622; No Mercari results</div>';
+    html += '<div class="status" style="padding:16px;font-size:12px;">&#x1F622; No Mercari results - result not found</div>';
   }
 
   html += '</div><div class="combined-col"><h3 class="yahoo-header">&#x1F4E6; Yahoo Auctions</h3>';
 
-  if (yahooItems.length) {
+  if (yErr) {
+    html += '<div class="status" style="padding:12px;font-size:12px;color:#d42c25;text-align:left;">&#x26A0; Yahoo search failed: '+escapeHtml(yErr)+'</div>';
+  } else if (yahooItems.length) {
     for (const item of yahooItems) {
       const badges = [];
       if (item.status === 'sold') badges.push('<span class="yahoo-badge sold">SOLD</span>');
       if (item.free_shipping) badges.push('<span class="yahoo-badge freeship">FREE SHIP</span>');
 
-      html += '<div class="yahoo-result-card" style="margin-bottom:8px;">'
-        + '<div class="yahoo-thumb" style="width:60px;min-height:60px;">'
+      html += '<div class="yahoo-result-card combined-item-card" style="margin-bottom:8px;">'
+        + '<div class="yahoo-thumb">'
         + (item.thumbnail ? '<img src="'+escapeHtml(item.thumbnail)+'" alt="" loading="lazy" onerror="handleImageError(this)">' : '<div class="yahoo-thumb-placeholder">&#x1F4E6;</div>')
         + '</div>'
         + '<div class="yahoo-info">'
-        + '<div class="yahoo-title">'+escapeHtml(item.title)+'</div>'
+        + '<div class="yahoo-title">'+highlightKeyword(item.title, kw)+'</div>'
         + '<div class="yahoo-price-row">'
         + '<div class="yahoo-price">&yen;'+Number(item.price).toLocaleString()+' <span>JPY</span></div>'
         + (item.buy_now_price ? '<div class="yahoo-buynow">BIN &yen;'+Number(item.buy_now_price).toLocaleString()+'</div>' : '')
@@ -1419,11 +1686,24 @@ function appendCombinedResult(kw, mercariItems, yahooItems) {
         + '</div></div>';
     }
   } else {
-    html += '<div class="status" style="padding:16px;font-size:12px;">&#x1F622; No Yahoo results</div>';
+    html += '<div class="status" style="padding:16px;font-size:12px;">&#x1F622; No Yahoo results - result not found</div>';
   }
 
-  html += '</div></div></div></div>';
-  groups.insertAdjacentHTML('beforeend', html);
+  html += buildCombinedEbayRef(ebayItem, ebayErr, ebayLink, showEbayRef, kw);
+  html += '</div>';
+  if (mErr || yErr || ebayErr) {
+    html += '<div class="retry-row">'
+      + '<button class="retry-btn" data-tab="combinedBulk" data-group="'+gid+'" data-kw="'+escapeHtml(kw)+'" data-ebay-link="'+escapeHtml(ebayLink || '')+'">&#x21BB; Re-search keyword</button>'
+      + '</div>';
+  }
+  html += '</div></div>';
+  return html;
+}
+
+function appendCombinedBulkResult(kw, mercariItems, yahooItems, mErr, yErr, ebayItem, ebayErr, ebayLink, showEbayRef, serial) {
+  const groups = document.getElementById('combinedGroups');
+  if (!groups) return;
+  groups.insertAdjacentHTML('beforeend', buildCombinedGroup(kw, mercariItems, yahooItems, mErr, yErr, nextGroupId(), ebayItem, ebayErr, ebayLink, showEbayRef, serial || 0));
 }
 
 // Stock Check
@@ -1469,6 +1749,7 @@ async function doStockCheck() {
     await streamBulkSearch('/api/check-stock', { links: links, keywords: keywords }, function(data) {
       appendStockResult(data);
       doneCount++;
+      if (doneCount >= 1) document.getElementById('stockDlBtn').style.display = 'inline-block';
       const badge = container.querySelector('.count-badge');
       if (badge) badge.innerHTML = 'Checking... '+doneCount+'/'+total;
     }, function() {
@@ -1614,6 +1895,52 @@ function getShippingHtml(item) {
   return '';
 }
 
+function buildEbayResultCard(item, highlightKw) {
+  const badges = [];
+  if (item.free_shipping) badges.push('<span class="ebay-badge freeship">FREE SHIP</span>');
+  if (item.top_rated_seller) badges.push('<span class="ebay-badge toprated">TOP RATED</span>');
+  if (item.is_auction) badges.push('<span class="ebay-badge auction">AUCTION</span>');
+  else badges.push('<span class="ebay-badge bin">BUY IT NOW</span>');
+
+  const priceSymbol = item.currency === 'USD' ? '$' : (item.currency === 'JPY' ? '&yen;' : item.currency+' ');
+  const titleHtml = highlightKw ? highlightKeyword(item.title, highlightKw) : escapeHtml(item.title);
+  let totalHtml = '';
+  if (item.free_shipping) {
+    var t = Number(item.price);
+    totalHtml = '<div class="result-price" style="font-size:13px;color:#2e7d32;">Total: '+priceSymbol+t.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})+' <span style="font-size:10px;">(incl. free ship)</span>'+(item.currency==='USD'?' '+toJpyDisplay(t):'')+'</div>';
+  } else if (item.shipping_cost !== null && item.shipping_cost !== undefined) {
+    var t = Number(item.price) + Number(item.shipping_cost);
+    totalHtml = '<div class="result-price" style="font-size:13px;color:#555;">Total: '+priceSymbol+t.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})+' <span style="font-size:10px;">(incl. shipping)</span>'+(item.currency==='USD'?' '+toJpyDisplay(t):'')+'</div>';
+  }
+  return '<div class="ebay-result-card">'
+    + '<div class="ebay-thumb">'
+    + (item.thumbnail ? '<img src="'+escapeHtml(item.thumbnail)+'" alt="" loading="lazy" onerror="handleImageError(this)">' : '<div class="ebay-thumb-placeholder">&#x1F4E6;</div>')
+    + '</div>'
+    + '<div class="ebay-info">'
+    + '<div class="ebay-title">'+titleHtml+'</div>'
+    + '<div class="ebay-price-row">'
+    + '<div class="ebay-price">'+priceSymbol+Number(item.price).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})+' <span>'+item.currency+'</span>'
+    + (item.currency === 'USD' ? '<span style="font-size:11px;color:#888;">'+toJpyDisplay(item.price)+'</span>' : '')
+    + '</div>'
+    + (item.buy_it_now_price ? '<div class="ebay-bin-price">BIN '+priceSymbol+Number(item.buy_it_now_price).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})+'</div>' : '')
+    + '</div>'
+    + totalHtml
+    + '<div class="ebay-meta">'
+    + getConditionBadge(item)
+    + (item.bid_count !== null && item.bid_count !== undefined ? '<span>&#x1F3F7; '+item.bid_count+' bid'+(item.bid_count!==1?'s':'')+'</span>' : '')
+    + (item.seller_name ? '<span>&#x1F464; '+escapeHtml(item.seller_name)+'</span>' : '')
+    + (item.seller_rating ? '<span>&#x2B50; '+item.seller_rating+'</span>' : '')
+    + (item.location ? '<span>&#x1F4CD; '+escapeHtml(item.location)+'</span>' : '')
+    + getShippingHtml(item)
+    + '</div>'
+    + '<div>'+badges.join(' ')+'</div>'
+    + '</div>'
+    + '<div class="ebay-actions">'
+    + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener" style="border:1px solid #0064d2;color:#0064d2;background:white;">View &rarr;</a>'
+    + '</div>'
+    + '</div>';
+}
+
 function renderEbayResults(items, keyword) {
   const container = document.getElementById('ebayResultsContainer');
   if (!items || !items.length) {
@@ -1622,48 +1949,7 @@ function renderEbayResults(items, keyword) {
   }
   let html = '<div class="count-badge">Found <strong>'+items.length+'</strong> item'+(items.length>1?'s':'')+'</div><div class="results">';
   for (const item of items) {
-    const badges = [];
-    if (item.free_shipping) badges.push('<span class="ebay-badge freeship">FREE SHIP</span>');
-    if (item.top_rated_seller) badges.push('<span class="ebay-badge toprated">TOP RATED</span>');
-    if (item.is_auction) badges.push('<span class="ebay-badge auction">AUCTION</span>');
-    else badges.push('<span class="ebay-badge bin">BUY IT NOW</span>');
-
-    const priceSymbol = item.currency === 'USD' ? '$' : (item.currency === 'JPY' ? '&yen;' : item.currency+' ');
-    let totalHtml = '';
-    if (item.free_shipping) {
-      var t = Number(item.price);
-      totalHtml = '<div class="result-price" style="font-size:13px;color:#2e7d32;">Total: '+priceSymbol+t.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})+' <span style="font-size:10px;">(incl. free ship)</span>'+(item.currency==='USD'?' '+toJpyDisplay(t):'')+'</div>';
-    } else if (item.shipping_cost !== null && item.shipping_cost !== undefined) {
-      var t = Number(item.price) + Number(item.shipping_cost);
-      totalHtml = '<div class="result-price" style="font-size:13px;color:#555;">Total: '+priceSymbol+t.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})+' <span style="font-size:10px;">(incl. shipping)</span>'+(item.currency==='USD'?' '+toJpyDisplay(t):'')+'</div>';
-    }
-    html += '<div class="ebay-result-card">'
-      + '<div class="ebay-thumb">'
-      + (item.thumbnail ? '<img src="'+escapeHtml(item.thumbnail)+'" alt="" loading="lazy" onerror="handleImageError(this)">' : '<div class="ebay-thumb-placeholder">&#x1F4E6;</div>')
-      + '</div>'
-      + '<div class="ebay-info">'
-      + '<div class="ebay-title">'+escapeHtml(item.title)+'</div>'
-      + '<div class="ebay-price-row">'
-      + '<div class="ebay-price">'+priceSymbol+Number(item.price).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})+' <span>'+item.currency+'</span>'
-      + (item.currency === 'USD' ? '<span style="font-size:11px;color:#888;">'+toJpyDisplay(item.price)+'</span>' : '')
-      + '</div>'
-      + (item.buy_it_now_price ? '<div class="ebay-bin-price">BIN '+priceSymbol+Number(item.buy_it_now_price).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})+'</div>' : '')
-      + '</div>'
-      + totalHtml
-      + '<div class="ebay-meta">'
-      + (item.condition ? '<span>'+escapeHtml(item.condition)+'</span>' : '')
-      + (item.bid_count !== null && item.bid_count !== undefined ? '<span>&#x1F3F7; '+item.bid_count+' bid'+(item.bid_count!==1?'s':'')+'</span>' : '')
-      + (item.seller_name ? '<span>&#x1F464; '+escapeHtml(item.seller_name)+'</span>' : '')
-      + (item.seller_rating ? '<span>&#x2B50; '+item.seller_rating+'</span>' : '')
-      + (item.location ? '<span>&#x1F4CD; '+escapeHtml(item.location)+'</span>' : '')
-      + getShippingHtml(item)
-      + '</div>'
-      + '<div>'+badges.join(' ')+'</div>'
-      + '</div>'
-      + '<div class="ebay-actions">'
-      + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener" style="border:1px solid #0064d2;color:#0064d2;background:white;">View &rarr;</a>'
-      + '</div>'
-      + '</div>';
+    html += buildEbayResultCard(item, keyword);
   }
   html += '</div>';
   container.innerHTML = html;
@@ -1728,27 +2014,43 @@ async function doEbayBulkSearch() {
   container.innerHTML = '<div class="count-badge streaming">Searching... 0/'+total+'</div><div id="ebayBulkGroups"></div>';
   window._ebayBulkCSV = [];
   let doneCount = 0;
+  let foundCount = 0;
+  let notFoundCount = 0;
+  let errCount = 0;
+  const cfgBody = {
+    keywords: keywords,
+    app_id: creds.appId,
+    cert_id: creds.certId,
+    per_keyword: parseInt(document.getElementById('ebayBulkLimit').value) || 3,
+    condition: document.getElementById('ebayBulkCondition').value,
+    sort: document.getElementById('ebayBulkSort').value,
+    global_id: document.getElementById('ebayBulkSite').value,
+    item_location: document.getElementById('ebayBulkItemLocation').value,
+    min_price: document.getElementById('ebayBulkMinPrice').value || '',
+    max_price: document.getElementById('ebayBulkMaxPrice').value || '',
+    bin_only: document.getElementById('ebayBulkBINOnly').checked ? '1' : ''
+  };
+  window._retryBulkConfigs = window._retryBulkConfigs || {};
+  window._retryBulkConfigs.ebayBulk = {url: '/api/ebay-bulk-search', body: cfgBody};
   try {
-    await streamBulkSearch('/api/ebay-bulk-search', {
-      keywords: keywords,
-      app_id: creds.appId,
-      cert_id: creds.certId,
-      per_keyword: parseInt(document.getElementById('ebayBulkLimit').value) || 3,
-      condition: document.getElementById('ebayBulkCondition').value,
-      sort: document.getElementById('ebayBulkSort').value,
-      global_id: document.getElementById('ebayBulkSite').value,
-      item_location: document.getElementById('ebayBulkItemLocation').value,
-      min_price: document.getElementById('ebayBulkMinPrice').value || '',
-      max_price: document.getElementById('ebayBulkMaxPrice').value || '',
-      bin_only: document.getElementById('ebayBulkBINOnly').checked ? '1' : ''
-    }, function(data) {
-      appendEbayBulkResult(data.keyword, data.items);
+    await streamBulkSearch('/api/ebay-bulk-search', cfgBody, function(data) {
+      const gid = nextGroupId();
+      document.getElementById('ebayBulkGroups').insertAdjacentHTML('beforeend', buildEbayBulkGroup(data.keyword, data.items, data.keyword_error, gid));
       doneCount++;
+      if (data.keyword_error) errCount++;
+      else if (data.items && data.items.length) foundCount++;
+      else notFoundCount++;
       const badge = container.querySelector('.count-badge');
       if (badge) badge.innerHTML = 'Searching... '+doneCount+'/'+total;
     }, function() {
       const badge = container.querySelector('.count-badge');
-      if (badge) badge.innerHTML = 'Results for <strong>'+doneCount+'</strong> keyword(s)';
+      if (badge) {
+        let msg = 'Results for <strong>'+doneCount+'</strong> keyword(s)';
+        msg += ' &middot; <strong>'+foundCount+'</strong> found';
+        if (notFoundCount) msg += ' &middot; <strong>'+notFoundCount+'</strong> not found';
+        if (errCount) msg += ' &middot; <strong>'+errCount+'</strong> error(s)';
+        badge.innerHTML = msg;
+      }
       const groups = document.getElementById('ebayBulkGroups');
       if (groups) {
         const dl = document.createElement('button');
@@ -1761,11 +2063,21 @@ async function doEbayBulkSearch() {
   finally { btn.classList.remove('loading'); btn.disabled = false; }
 }
 
-function appendEbayBulkResult(kw, items) {
+function buildEbayBulkGroup(kw, items, keywordError, gid) {
   const groups = document.getElementById('ebayBulkGroups');
-  if (!groups) return;
-  if (!items || !items.length) return;
-  let html = '<div class="bulk-result-group"><div class="bulk-result-header" onclick="toggleBulkGroup(this)">'
+  if (!groups) return '';
+  if (!items || !items.length) {
+    const failed = !!keywordError;
+    const msg = failed ? 'Search failed: '+escapeHtml(keywordError) : 'Result not found';
+    const bodyMsg = failed ? 'Could not fetch results for this keyword. Error: '+escapeHtml(keywordError)+'. Try searching it manually.' : 'No items found for this keyword. Try searching it manually.';
+    return '<div class="bulk-result-group" id="'+gid+'">'
+      + '<div class="bulk-result-header" onclick="toggleBulkGroup(this)" style="'+(failed?'background:#fff0f0;color:#d42c25;':'background:#f7f7f7;')+'">'
+      + escapeHtml(kw) + ' <span class="count">'+msg+'</span></div>'
+      + '<div class="bulk-result-body"><div class="status" style="padding:10px;font-size:12px;text-align:left;color:'+(failed?'#d42c25':'#999')+';">'+(failed?'&#x26A0; ':'&#x1F622; ')+bodyMsg+'</div>'
+      + (failed ? '<div class="retry-row"><button class="retry-btn" data-tab="ebayBulk" data-group="'+gid+'" data-kw="'+escapeHtml(kw)+'">&#x21BB; Re-search keyword</button></div>' : '')
+      + '</div></div>';
+  }
+  let html = '<div class="bulk-result-group" id="'+gid+'"><div class="bulk-result-header" onclick="toggleBulkGroup(this)">'
     + escapeHtml(kw) + ' <span class="count">'+items.length+' item(s)</span></div>'
     + '<div class="bulk-result-body"><div class="results">';
   for (const item of items) {
@@ -1796,7 +2108,7 @@ function appendEbayBulkResult(kw, items) {
       + '</div>'
       + totalHtml
       + '<div class="ebay-meta">'
-      + (item.condition ? '<span>'+escapeHtml(item.condition)+'</span>' : '')
+      + getConditionBadge(item)
       + (item.bid_count !== null && item.bid_count !== undefined ? '<span>'+item.bid_count+' bids</span>' : '')
       + getShippingHtml(item)
       + '</div>'
@@ -1807,8 +2119,14 @@ function appendEbayBulkResult(kw, items) {
       + '</div></div>';
     window._ebayBulkCSV.push({keyword: kw, title: item.title, price: item.price, currency: item.currency, buy_it_now_price: item.buy_it_now_price, bid_count: item.bid_count, condition: item.condition, seller_name: item.seller_name, location: item.location, free_shipping: item.free_shipping, shipping_cost: item.shipping_cost, listing_type: item.listing_type, url: item.url});
   }
-  html += '</div></div></div>';
-  groups.insertAdjacentHTML('beforeend', html);
+  html += '</div></div>';
+  if (keywordError) {
+    html += '<div class="retry-row">'
+      + '<button class="retry-btn" data-tab="ebayBulk" data-group="'+gid+'" data-kw="'+escapeHtml(kw)+'">&#x21BB; Re-search keyword</button>'
+      + '</div>';
+  }
+  html += '</div></div>';
+  return html;
 }
 
 function downloadEbayBulkCSV() {
@@ -1835,7 +2153,60 @@ document.addEventListener('click', function(e) {
     fetchYahooDescription(yahooBtn.getAttribute('data-yahoo-id'));
     return;
   }
+  const retryBtn = e.target.closest('.retry-btn');
+  if (retryBtn) {
+    e.preventDefault();
+    e.stopPropagation();
+    retryBulkItem(retryBtn);
+    return;
+  }
 });
+
+async function retryBulkItem(btn) {
+  const tab = btn.getAttribute('data-tab');
+  const gid = btn.getAttribute('data-group');
+  const kw = btn.getAttribute('data-kw');
+  const ebayLink = btn.getAttribute('data-ebay-link') || '';
+  const cfg = (window._retryBulkConfigs || {})[tab];
+  const group = document.getElementById(gid);
+  if (!cfg || !group) return;
+  if (btn.classList.contains('loading')) return;
+  btn.classList.add('loading');
+  btn.textContent = 'Searching...';
+  const body = Object.assign({}, cfg.body);
+  body.keywords = [kw];
+  body.ebay_links = ebayLink ? [ebayLink] : [];
+  const showEbayRef = cfg.showEbayRef || body.ebay_links.length > 0;
+  try {
+    await streamBulkSearch(cfg.url, body, function(data) {
+      let html = '';
+      if (tab === 'mercariBulk') {
+        html = buildBulkResultGroup(data.keyword, data.items || [], data.keyword_error, gid);
+      } else if (tab === 'yahooBulk') {
+        html = buildYahooBulkGroup(data.keyword, data.items || [], data.keyword_error, gid);
+      } else if (tab === 'combinedBulk') {
+        html = buildCombinedGroup(data.keyword, data.mercari_items || [], data.yahoo_items || [], data.mercari_error, data.yahoo_error, gid, data.ebay_item, data.ebay_error, data.ebay_link || ebayLink, showEbayRef, group.dataset.serial || 0);
+      } else if (tab === 'ebayBulk') {
+        html = buildEbayBulkGroup(data.keyword, data.items || [], data.keyword_error, gid);
+      }
+      const tmp = document.createElement('div');
+      tmp.innerHTML = html;
+      group.outerHTML = tmp.firstChild.outerHTML;
+    }, function () {
+      const fresh = document.getElementById(gid);
+      if (!fresh) return;
+      const rb = fresh.querySelector('.retry-btn');
+      if (rb) { rb.classList.remove('loading'); rb.textContent = '&#x21BB; Re-search keyword'; }
+    });
+  } catch (err) {
+    const fresh = document.getElementById(gid);
+    if (fresh) {
+      const rb = fresh.querySelector('.retry-btn');
+      if (rb) { rb.classList.remove('loading'); rb.textContent = '&#x21BB; Re-search keyword'; }
+      showError(err.message);
+    }
+  }
+}
 </script>
 </body>
 </html>'''
@@ -2014,6 +2385,45 @@ def batch_translate(texts):
         pass
     return [''] * len(texts)
 
+def _bulk_deadline(keywords_list):
+    return time.monotonic() + 90 + len(keywords_list) * 90
+
+def _take_future(fut, remaining, label):
+    try:
+        if remaining <= 0:
+            raise TimeoutError()
+        return fut.result(timeout=remaining)
+    except TimeoutError:
+        return None, '{} timed out (took too long)'.format(label)
+    except Exception as e:
+        return None, str(e) or '{} failed'.format(label)
+
+def _ebay_item_dict(item):
+    return {
+        'id': item.id,
+        'title': item.title,
+        'price': item.price,
+        'currency': item.currency,
+        'condition': item.condition,
+        'condition_id': item.condition_id,
+        'thumbnail': item.thumbnail,
+        'url': item.url,
+        'listing_type': item.listing_type,
+        'bid_count': item.bid_count,
+        'buy_it_now_price': item.buy_it_now_price,
+        'seller_name': item.seller_name,
+        'seller_rating': item.seller_rating,
+        'seller_feedback_percent': item.seller_feedback_percent,
+        'location': item.location,
+        'shipping_cost': item.shipping_cost,
+        'shipping_type': item.shipping_type,
+        'free_shipping': item.free_shipping,
+        'end_time': item.end_time,
+        'is_auction': item.is_auction,
+        'top_rated_seller': item.top_rated_seller,
+        'category_name': item.category_name,
+    }
+
 @app.route('/api/item-info/<item_id>')
 def api_item_info(item_id):
     try:
@@ -2129,7 +2539,7 @@ def api_bulk_search():
                         break
 
                 if not items:
-                    return kw, []
+                    return kw, [], None
 
                 if needs_review_filter:
                     with ThreadPoolExecutor(max_workers=5) as info_pool:
@@ -2166,18 +2576,36 @@ def api_bulk_search():
                     it['name_en'] = translations[i] if i < len(translations) else ''
                     it['condition_en'] = COND_EN.get(it['condition'], it['condition'])
 
-                return kw, items
-            except Exception:
-                return kw, []
+                return kw, items, None
+            except Exception as e:
+                return kw, [], str(e) or 'Search failed'
 
         keywords_list = [k.strip() for k in keywords[:100] if k.strip()]
 
         def generate():
-            with ThreadPoolExecutor(max_workers=5) as kw_pool:
-                futures = {kw_pool.submit(search_keyword, kw): kw for kw in keywords_list}
-                for f in as_completed(futures):
-                    kw, items = f.result()
-                    yield 'data: ' + json.dumps({'keyword': kw, 'items': items}, ensure_ascii=False) + '\n\n'
+            pool = ThreadPoolExecutor(max_workers=5)
+            try:
+                futures = {pool.submit(search_keyword, kw): kw for kw in keywords_list}
+                pending = dict(futures)
+                deadline = _bulk_deadline(keywords_list)
+                while pending:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    done, _ = wait(pending, timeout=min(remaining, 1.0))
+                    for f in done:
+                        kw = futures[f]
+                        try:
+                            kw, items, err = f.result()
+                        except Exception as e:
+                            items, err = [], str(e) or 'Search failed'
+                        yield 'data: ' + json.dumps({'keyword': kw, 'items': items, 'keyword_error': err}, ensure_ascii=False) + '\n\n'
+                    for f in done:
+                        pending.pop(f, None)
+                for f, kw in pending.items():
+                    yield 'data: ' + json.dumps({'keyword': kw, 'items': [], 'keyword_error': 'Search timed out (took too long)'}, ensure_ascii=False) + '\n\n'
+            finally:
+                pool.shutdown(wait=False)
             yield 'data: ' + json.dumps({'complete': True, 'keywords': keywords_list}, ensure_ascii=False) + '\n\n'
 
         return Response(stream_with_context(generate()), mimetype='text/event-stream')
@@ -2312,18 +2740,36 @@ def api_yahoo_bulk_search():
                         'is_new': item.is_new,
                         'status': item.status,
                     })
-                return kw, items
-            except Exception:
-                return kw, []
+                return kw, items, None
+            except Exception as e:
+                return kw, [], str(e) or 'Search failed'
 
         keywords_list = [k.strip() for k in keywords[:100] if k.strip()]
 
         def generate():
-            with ThreadPoolExecutor(max_workers=5) as pool:
+            pool = ThreadPoolExecutor(max_workers=5)
+            try:
                 futures = {pool.submit(search_keyword, kw): kw for kw in keywords_list}
-                for f in as_completed(futures):
-                    kw, items = f.result()
-                    yield 'data: ' + json.dumps({'keyword': kw, 'items': items}, ensure_ascii=False) + '\n\n'
+                pending = dict(futures)
+                deadline = _bulk_deadline(keywords_list)
+                while pending:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    done, _ = wait(pending, timeout=min(remaining, 1.0))
+                    for f in done:
+                        kw = futures[f]
+                        try:
+                            kw, items, err = f.result()
+                        except Exception as e:
+                            items, err = [], str(e) or 'Search failed'
+                        yield 'data: ' + json.dumps({'keyword': kw, 'items': items, 'keyword_error': err}, ensure_ascii=False) + '\n\n'
+                    for f in done:
+                        pending.pop(f, None)
+                for f, kw in pending.items():
+                    yield 'data: ' + json.dumps({'keyword': kw, 'items': [], 'keyword_error': 'Search timed out (took too long)'}, ensure_ascii=False) + '\n\n'
+            finally:
+                pool.shutdown(wait=False)
             yield 'data: ' + json.dumps({'complete': True, 'keywords': keywords_list}, ensure_ascii=False) + '\n\n'
 
         return Response(stream_with_context(generate()), mimetype='text/event-stream')
@@ -2358,8 +2804,16 @@ def api_combined_bulk_search():
         yahoo_bin_filter = data.get('yahoo_bin_filter', 'all')
         mercari_min_reviews = int(data.get('mercari_min_reviews', 0)) or 0
         mercari_exclude_auctions = data.get('mercari_exclude_auctions', '') in ('1', 'true', True)
+        raw_ebay_links = data.get('ebay_links', [])
+        if not isinstance(raw_ebay_links, list):
+            raw_ebay_links = []
+        app_id = data.get('app_id', '').strip() or os.environ.get('EBAY_APP_ID', '')
+        cert_id = data.get('cert_id', '').strip() or os.environ.get('EBAY_CERT_ID', '')
 
         keywords_list = [k.strip() for k in keywords[:50] if k.strip()]
+        ebay_links = [str(x).strip() for x in raw_ebay_links[:len(keywords_list)]]
+        while len(ebay_links) < len(keywords_list):
+            ebay_links.append('')
 
         COND_EN = {
             '新品、未使用': 'NEW, UNUSED',
@@ -2439,9 +2893,9 @@ def api_combined_bulk_search():
                     translations = batch_translate(names)
                     for i, it in enumerate(items):
                         it['name_en'] = translations[i] if i < len(translations) else ''
-                return items
-            except Exception:
-                return []
+                return items, None
+            except Exception as e:
+                return [], str(e) or 'Mercari search failed'
 
         def search_yahoo_kw(kw):
             try:
@@ -2473,40 +2927,58 @@ def api_combined_bulk_search():
                         'is_new': item.is_new,
                         'status': item.status,
                     })
-                return yahoo_items
-            except Exception:
-                return []
+                return yahoo_items, None
+            except Exception as e:
+                return [], str(e) or 'Yahoo search failed'
 
-        keywords_done = set()
-        mercari_temp = {}
-        yahoo_temp = {}
+        def fetch_ebay_ref(link, token):
+            if not link:
+                return None, None
+            if not app_id or not cert_id:
+                return None, 'eBay App ID and Cert ID required'
+            try:
+                item = get_ebay_item(app_id, cert_id, link, token=token)
+                return _ebay_item_dict(item), None
+            except Exception as e:
+                return None, str(e) or 'eBay item fetch failed'
 
         def generate():
-            nonlocal mercari_temp, yahoo_temp
-            with ThreadPoolExecutor(max_workers=10) as pool:
-                mercari_futures = {pool.submit(search_mercari_kw, kw): kw for kw in keywords_list}
-                yahoo_futures = {pool.submit(search_yahoo_kw, kw): kw for kw in keywords_list}
-                all_futures = list(mercari_futures.keys()) + list(yahoo_futures.keys())
-                for f in as_completed(all_futures):
-                    kw = mercari_futures.get(f) or yahoo_futures.get(f)
-                    if f in mercari_futures:
-                        mercari_temp[kw] = f.result()
-                    else:
-                        yahoo_temp[kw] = f.result()
-                    if kw not in keywords_done and kw in mercari_temp and kw in yahoo_temp:
-                        keywords_done.add(kw)
-                        yield 'data: ' + json.dumps({
-                            'keyword': kw,
-                            'mercari_items': mercari_temp.get(kw, []),
-                            'yahoo_items': yahoo_temp.get(kw, [])
-                        }, ensure_ascii=False) + '\n\n'
-                for kw in keywords_list:
-                    if kw not in keywords_done:
-                        yield 'data: ' + json.dumps({
-                            'keyword': kw,
-                            'mercari_items': mercari_temp.get(kw, []),
-                            'yahoo_items': yahoo_temp.get(kw, [])
-                        }, ensure_ascii=False) + '\n\n'
+            pool = ThreadPoolExecutor(max_workers=10)
+            ebay_token = None
+            if any(ebay_links) and app_id and cert_id:
+                try:
+                    ebay_token = get_ebay_oauth_token(app_id, cert_id)
+                except Exception:
+                    ebay_token = None
+            try:
+                mercari_futures = {kw: pool.submit(search_mercari_kw, kw) for kw in keywords_list}
+                yahoo_futures = {kw: pool.submit(search_yahoo_kw, kw) for kw in keywords_list}
+                ebay_futures = {}
+                if ebay_token:
+                    for i, link in enumerate(ebay_links):
+                        if link:
+                            ebay_futures[i] = pool.submit(fetch_ebay_ref, link, ebay_token)
+                deadline = _bulk_deadline(keywords_list)
+                for i, kw in enumerate(keywords_list):
+                    m_items, m_err = _take_future(mercari_futures[kw], deadline - time.monotonic(), 'Mercari search')
+                    y_items, y_err = _take_future(yahoo_futures[kw], deadline - time.monotonic(), 'Yahoo search')
+                    e_item, e_err, e_link = None, None, ebay_links[i] if i < len(ebay_links) else ''
+                    if i in ebay_futures:
+                        e_item, e_err = _take_future(ebay_futures[i], deadline - time.monotonic(), 'eBay item fetch')
+                    elif e_link and not ebay_token:
+                        e_err = 'eBay credentials invalid or OAuth failed'
+                    yield 'data: ' + json.dumps({
+                        'keyword': kw,
+                        'mercari_items': m_items or [],
+                        'yahoo_items': y_items or [],
+                        'mercari_error': m_err,
+                        'yahoo_error': y_err,
+                        'ebay_item': e_item,
+                        'ebay_error': e_err,
+                        'ebay_link': e_link,
+                    }, ensure_ascii=False) + '\n\n'
+            finally:
+                pool.shutdown(wait=False)
             yield 'data: ' + json.dumps({'complete': True, 'keywords': keywords_list}, ensure_ascii=False) + '\n\n'
 
         return Response(stream_with_context(generate()), mimetype='text/event-stream')
@@ -2528,9 +3000,17 @@ def api_check_stock():
         if not isinstance(raw_keywords, list):
             raw_keywords = []
 
-        links = [l.strip() for l in links[:200] if l.strip()]
-        keywords = [k.strip() for k in raw_keywords[:200] if k.strip()]
         import re
+        link_pattern = re.compile(r'https?://[^\s]+?(?=https?://|$)')
+        raw_links = links
+        links = []
+        for l in raw_links[:200]:
+            for url in link_pattern.findall(l):
+                url = url.strip()
+                if url:
+                    links.append(url)
+        keywords = [k.strip() for k in raw_keywords[:200] if k.strip()]
+        keywords = keywords[:len(links)]
 
         def parse_link(link):
             yahoo_match = re.search(r'auctions\.yahoo\.co\.jp/(?:jp/)?auction/([a-zA-Z0-9_]+)', link)
@@ -2742,7 +3222,19 @@ def api_check_stock():
                         'url': link
                     }
                 elif platform == 'mercari':
-                    item = getItemInfo(item_id)
+                    try:
+                        item = getItemInfo(item_id)
+                    except http_requests.exceptions.HTTPError as e:
+                        if e.response is not None and e.response.status_code in (403, 404):
+                            return {**base_result,
+                                'name': '',
+                                'price': 0,
+                                'status': 'item_removed',
+                                'available': False,
+                                'available_text': 'Out of Stock',
+                                'url': link
+                            }
+                        raise
                     status = getattr(item, 'status', '') or ''
                     name = getattr(item, 'name', '')
                     price = getattr(item, 'price', 0)
@@ -3009,18 +3501,36 @@ def api_ebay_bulk_search():
                         'is_auction': item.is_auction,
                         'top_rated_seller': item.top_rated_seller,
                     })
-                return kw, items
-            except Exception:
-                return kw, []
+                return kw, items, None
+            except Exception as e:
+                return kw, [], str(e) or 'Search failed'
 
         keywords_list = [k.strip() for k in keywords[:100] if k.strip()]
 
         def generate():
-            with ThreadPoolExecutor(max_workers=5) as pool:
+            pool = ThreadPoolExecutor(max_workers=5)
+            try:
                 futures = {pool.submit(search_keyword, kw): kw for kw in keywords_list}
-                for f in as_completed(futures):
-                    kw, items = f.result()
-                    yield 'data: ' + json.dumps({'keyword': kw, 'items': items}, ensure_ascii=False) + '\n\n'
+                pending = dict(futures)
+                deadline = _bulk_deadline(keywords_list)
+                while pending:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    done, _ = wait(pending, timeout=min(remaining, 1.0))
+                    for f in done:
+                        kw = futures[f]
+                        try:
+                            kw, items, err = f.result()
+                        except Exception as e:
+                            items, err = [], str(e) or 'Search failed'
+                        yield 'data: ' + json.dumps({'keyword': kw, 'items': items, 'keyword_error': err}, ensure_ascii=False) + '\n\n'
+                    for f in done:
+                        pending.pop(f, None)
+                for f, kw in pending.items():
+                    yield 'data: ' + json.dumps({'keyword': kw, 'items': [], 'keyword_error': 'Search timed out (took too long)'}, ensure_ascii=False) + '\n\n'
+            finally:
+                pool.shutdown(wait=False)
             yield 'data: ' + json.dumps({'complete': True, 'keywords': keywords_list}, ensure_ascii=False) + '\n\n'
 
         return Response(stream_with_context(generate()), mimetype='text/event-stream')
