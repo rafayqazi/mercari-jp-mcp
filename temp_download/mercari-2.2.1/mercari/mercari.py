@@ -51,9 +51,17 @@ class Item:
         self.itemCondition = kwargs.get('item_condition', None)
         self.itemConditionId = kwargs.get('itemConditionId', None)
         self.shippingPayer = kwargs.get('shipping_payer', None)
-        # shop item detection from raw API response
+        # shop item detection using actual API response fields:
+        # itemType == 'ITEM_TYPE_BEYOND' and shop != None indicate a Mercari Shops item.
+        # The API never sends isShopItem/is_shop_item, so we derive it from itemType and shop.
+        item_type = kwargs.get('itemType', '')
+        shop_data = kwargs.get('shop', None)
         raw = kwargs.get('isShopItem', kwargs.get('is_shop_item', False))
-        self.isShopItem = str(raw).lower() in ('true', '1') if not isinstance(raw, bool) else raw
+        legacy_flag = str(raw).lower() in ('true', '1') if not isinstance(raw, bool) else raw
+        self.isShopItem = legacy_flag or item_type == 'ITEM_TYPE_BEYOND' or shop_data is not None
+        # Auto-correct productURL for shop items to use the /shops/product/ path
+        if self.isShopItem:
+            self.productURL = "https://jp.mercari.com/shops/product/{}".format(kwargs['id'])
         # this is optional, only present if the item is an auction
         if "auction" in kwargs and kwargs["auction"] is not None:
             self.auction = ItemAuction(**kwargs['auction'])

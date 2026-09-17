@@ -151,6 +151,15 @@ HTML_PAGE = u'''<!DOCTYPE html>
   .combined-filter-section h4 { font-size: 11px; font-weight: 700; color: #888; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.4px; }
   .combined-filter-section.mercari h4 { color: #ea352d; }
   .combined-filter-section.yahoo h4 { color: #222; }
+  .site-toggles { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+  .site-toggle-btn { display: flex; align-items: center; gap: 8px; padding: 7px 14px; border-radius: 20px; border: 2px solid #ddd; background: #f5f5f5; cursor: pointer; font-size: 13px; font-weight: 600; color: #999; transition: all 0.2s; user-select: none; }
+  .site-toggle-btn .toggle-dot { width: 10px; height: 10px; border-radius: 50%; background: #ccc; transition: background 0.2s; }
+  .site-toggle-btn.active { border-color: transparent; color: white; }
+  .site-toggle-btn.active.mercari-toggle { background: linear-gradient(135deg, #ea352d, #c0392b); border-color: #ea352d; }
+  .site-toggle-btn.active.mercari-toggle .toggle-dot { background: rgba(255,255,255,0.8); }
+  .site-toggle-btn.active.yahoo-toggle { background: linear-gradient(135deg, #ff0033, #a800a8); border-color: #cc0033; }
+  .site-toggle-btn.active.yahoo-toggle .toggle-dot { background: rgba(255,255,255,0.8); }
+  .combined-filter-section.disabled { opacity: 0.4; pointer-events: none; }
   .combined-filter-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; align-items: end; }
   .combined-filter-grid .checkbox-row { display: flex; align-items: center; gap: 8px; min-height: 42px; }
   .combined-filter-grid .checkbox-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; flex-shrink: 0; }
@@ -191,6 +200,9 @@ HTML_PAGE = u'''<!DOCTYPE html>
   .stock-price { font-size: 15px; font-weight: 700; color: #333; white-space: nowrap; flex-shrink: 0; }
   .stock-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 500; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .stock-keyword { font-size: 11px; font-weight: 600; color: #555; background: #f0f0f0; padding: 2px 8px; border-radius: 4px; white-space: nowrap; flex-shrink: 0; max-width: 140px; overflow: hidden; text-overflow: ellipsis; }
+  .stock-ebay-btn { font-size: 11px; font-weight: 600; color: #0064d2; background: #e8f0fe; border: 1px solid #c2d7fa; padding: 3px 8px; border-radius: 4px; text-decoration: none; white-space: nowrap; flex-shrink: 0; transition: all 0.2s; }
+  .stock-ebay-btn:hover { background: #0064d2; color: white; border-color: #0064d2; }
+  .stock-form-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 12px; }
   .stock-sno { font-size: 12px; font-weight: 700; color: #999; min-width: 28px; text-align: center; flex-shrink: 0; }
   .ebay-result-card { display: flex; gap: 12px; padding: 12px; background: white; border: 1px solid #eee; border-radius: 10px; transition: box-shadow 0.2s; align-items: stretch; overflow: hidden; }
   .ebay-result-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.1); }
@@ -224,7 +236,7 @@ HTML_PAGE = u'''<!DOCTYPE html>
   .settings-section .btn-save { padding: 8px 16px; background: #0064d2; color: white; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; font-weight: 500; }
   .settings-section .btn-save:hover { background: #0053b0; }
   .settings-section .status-msg { font-size: 12px; color: #2e7d32; display: none; }
-  @media (max-width: 900px) { .combined-grid, .combined-grid.has-ebay { grid-template-columns: 1fr; } }
+  @media (max-width: 900px) { .combined-grid, .combined-grid.has-ebay { grid-template-columns: 1fr; } .stock-form-row { grid-template-columns: 1fr; } }
   @media (max-width: 600px) { .form-row { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -510,6 +522,14 @@ HTML_PAGE = u'''<!DOCTYPE html>
 <div class="tab-content" id="tabCombinedBulk">
   <div class="card">
     <h2>Mercari + Yahoo Bulk Search</h2>
+    <div class="site-toggles">
+      <button type="button" class="site-toggle-btn mercari-toggle active" id="toggleMercari" onclick="toggleSite('mercari')">
+        <span class="toggle-dot"></span> 📱 Mercari
+      </button>
+      <button type="button" class="site-toggle-btn yahoo-toggle active" id="toggleYahoo" onclick="toggleSite('yahoo')">
+        <span class="toggle-dot"></span> 🏯 Yahoo Auctions
+      </button>
+    </div>
     <div class="bulk-area">
       <div class="file-upload" id="combinedFileUpload">
         <input type="file" accept=".txt,.csv,.xlsx" id="combinedFileInput" onchange="handleCombinedFile(event)">
@@ -785,10 +805,14 @@ HTML_PAGE = u'''<!DOCTYPE html>
   <div class="card">
     <h2>Check Out Of Stock</h2>
     <div class="bulk-area">
-      <div class="form-row">
+      <div class="form-row stock-form-row">
         <div class="form-group">
           <label for="stockKeywords">Keywords (one per line, paired by index)</label>
           <textarea id="stockKeywords" placeholder="Keyword for each link&#10;e.g.&#10;iPhone 15 Pro&#10;Canon PowerShot&#10;PS5" style="min-height:120px;"></textarea>
+        </div>
+        <div class="form-group">
+          <label for="stockEbayLinks">eBay Links (one per line, paired by index)</label>
+          <textarea id="stockEbayLinks" placeholder="Paste eBay reference links here&#10;e.g.&#10;https://www.ebay.com/itm/123456789012&#10;https://www.ebay.com/itm/987654321098" style="min-height:120px;"></textarea>
         </div>
         <div class="form-group">
           <label for="stockLinks">Product Links (one per line)</label>
@@ -1091,8 +1115,11 @@ async function streamBulkSearch(url, body, onResult, onComplete, onError) {
         if (line.startsWith('data: ')) {
           try {
             const data = JSON.parse(line.slice(6));
-            if (data.error) { if (onError) onError(data.error); return; }
             if (data.complete) { if (onComplete) onComplete(data); return; }
+            if (data.fatal_error || (data.error && !data.link && !data.keyword && !data.items && !data.mercari_items && !data.yahoo_items && !data.name && !data.platform)) {
+              if (onError) onError(data.error);
+              return;
+            }
             if (onResult) onResult(data);
           } catch(e) {}
         }
@@ -1499,6 +1526,25 @@ function downloadYahooBulkCSV() {
 document.getElementById('combinedKeywords').addEventListener('input', updateCombinedCount);
 document.getElementById('combinedEbayLinks').addEventListener('input', updateCombinedCount);
 
+function toggleSite(site) {
+  var btn = document.getElementById(site === 'mercari' ? 'toggleMercari' : 'toggleYahoo');
+  var section = document.querySelector('.combined-filter-section.' + site);
+  var isActive = btn.classList.contains('active');
+  // Prevent both being turned off at the same time
+  var otherId = site === 'mercari' ? 'toggleYahoo' : 'toggleMercari';
+  var otherBtn = document.getElementById(otherId);
+  if (isActive && !otherBtn.classList.contains('active')) {
+    return; // Can\'t turn off the only active site
+  }
+  if (isActive) {
+    btn.classList.remove('active');
+    if (section) section.classList.add('disabled');
+  } else {
+    btn.classList.add('active');
+    if (section) section.classList.remove('disabled');
+  }
+}
+
 function parseCombinedEbayLinks() {
   const v = document.getElementById('combinedEbayLinks').value.trim();
   return v ? v.split('\\n').map(function(l){ return l.trim(); }).filter(function(l){ return l; }) : [];
@@ -1564,9 +1610,13 @@ async function doCombinedBulkSearch() {
   let foundCount = 0;
   let notFoundCount = 0;
   let errCount = 0;
+  var mercariEnabled = document.getElementById('toggleMercari').classList.contains('active');
+  var yahooEnabled = document.getElementById('toggleYahoo').classList.contains('active');
   const cfgBody = {
     keywords: keywords,
     per_keyword: parseInt(document.getElementById('combinedLimit').value) || 3,
+    enable_mercari: mercariEnabled,
+    enable_yahoo: yahooEnabled,
     mercari_status: document.getElementById('combinedStatus').value,
       mercari_condition: document.getElementById('combinedCondition').value,
       mercari_min_reviews: parseInt(document.getElementById('combinedMinReviews').value) || 0,
@@ -1708,11 +1758,22 @@ function appendCombinedBulkResult(kw, mercariItems, yahooItems, mErr, yErr, ebay
 
 // Stock Check
 document.getElementById('stockLinks').addEventListener('input', updateStockCount);
+document.getElementById('stockKeywords').addEventListener('input', updateStockCount);
+document.getElementById('stockEbayLinks').addEventListener('input', updateStockCount);
 
 function updateStockCount() {
   const v = document.getElementById('stockLinks').value.trim();
   const n = v ? v.split('\\n').filter(function(l){ return l.trim(); }).length : 0;
-  document.getElementById('stockCount').textContent = n ? n+' link(s) loaded' : '';
+  const kw = document.getElementById('stockKeywords').value.trim();
+  const nKw = kw ? kw.split('\\n').filter(function(l){ return l.trim(); }).length : 0;
+  const eb = document.getElementById('stockEbayLinks').value.trim();
+  const nEb = eb ? eb.split('\\n').filter(function(l){ return l.trim(); }).length : 0;
+
+  let text = n ? n + ' link(s) loaded' : '';
+  if (nKw || nEb) {
+    text += ' (' + nKw + ' keyword(s), ' + nEb + ' ebay link(s))';
+  }
+  document.getElementById('stockCount').textContent = text;
 }
 
 function showModalError(msg) {
@@ -1730,11 +1791,25 @@ async function doStockCheck() {
   const btn = document.getElementById('stockBtn');
   const errDiv = document.getElementById('errorMsg');
   errDiv.style.display = 'none';
-  const kwText = document.getElementById('stockKeywords').value.trim();
-  const linkText = document.getElementById('stockLinks').value.trim();
-  if (!linkText) { showModalError('Paste product links first'); return; }
-  const links = linkText.split('\\n').map(function(l){ return l.trim(); }).filter(function(l){ return l; });
-  const keywords = kwText ? kwText.split('\\n').map(function(l){ return l.trim(); }).filter(function(l){ return l; }) : [];
+  const kwText = document.getElementById('stockKeywords').value;
+  const ebayText = document.getElementById('stockEbayLinks').value;
+  const linkText = document.getElementById('stockLinks').value;
+  if (!linkText.trim()) { showModalError('Paste product links first'); return; }
+  
+  const rawLinks = linkText.split('\\n').map(function(l){ return l.trim(); });
+  const rawKw = (kwText ? kwText.split('\\n') : []).map(function(l){ return l.trim(); });
+  const rawEb = (ebayText ? ebayText.split('\\n') : []).map(function(l){ return l.trim(); });
+
+  const links = [];
+  const keywords = [];
+  const ebayLinks = [];
+  for (let i = 0; i < rawLinks.length; i++) {
+    if (rawLinks[i]) {
+      links.push(rawLinks[i]);
+      keywords.push(rawKw[i] || '');
+      ebayLinks.push(rawEb[i] || '');
+    }
+  }
   if (!links.length) { showModalError('No valid links found'); return; }
   if (links.length > 200) { showModalError('Maximum 200 links allowed'); return; }
   btn.classList.add('loading'); btn.disabled = true;
@@ -1746,7 +1821,7 @@ async function doStockCheck() {
   _stockSno = 0;
   let doneCount = 0;
   try {
-    await streamBulkSearch('/api/check-stock', { links: links, keywords: keywords }, function(data) {
+    await streamBulkSearch('/api/check-stock', { links: links, keywords: keywords, ebay_links: ebayLinks }, function(data) {
       appendStockResult(data);
       doneCount++;
       if (doneCount >= 1) document.getElementById('stockDlBtn').style.display = 'inline-block';
@@ -1775,7 +1850,8 @@ function appendStockResult(data) {
     window._stockErrors.push(_stockSno + '. ' + (data.keyword||'') + ' -> ' + linkShort + ' -> ' + data.error);
     list.insertAdjacentHTML('beforeend', '<div class="stock-card">'
       + '<span class="stock-sno">'+_stockSno+'</span>'
-      + (data.keyword ? '<span class="stock-keyword" title="Keyword">'+escapeHtml(data.keyword)+'</span>' : '')
+      + (data.keyword ? '<span class="stock-keyword" title="Keyword: '+escapeHtml(data.keyword)+'">'+escapeHtml(data.keyword)+'</span>' : '')
+      + (data.ebay_link ? '<a class="stock-ebay-btn" href="'+escapeHtml(data.ebay_link)+'" target="_blank" rel="noopener" title="eBay Link: '+escapeHtml(data.ebay_link)+'">eBay Item &rarr;</a>' : '')
       + '<span class="stock-platform '+(data.platform || '')+'">'+(data.platform || '?').toUpperCase()+'</span>'
       + '<span class="stock-link-text">'+escapeHtml(data.link)+'</span>'
       + '<span class="stock-status error">Error: '+escapeHtml(data.error)+'</span>'
@@ -1789,7 +1865,8 @@ function appendStockResult(data) {
   const statusLabel = data.available_text || 'Unknown';
   list.insertAdjacentHTML('beforeend', '<div class="stock-card">'
     + '<span class="stock-sno">'+_stockSno+'</span>'
-    + (data.keyword ? '<span class="stock-keyword" title="Keyword">'+escapeHtml(data.keyword)+'</span>' : '')
+    + (data.keyword ? '<span class="stock-keyword" title="Keyword: '+escapeHtml(data.keyword)+'">'+escapeHtml(data.keyword)+'</span>' : '')
+    + (data.ebay_link ? '<a class="stock-ebay-btn" href="'+escapeHtml(data.ebay_link)+'" target="_blank" rel="noopener" title="eBay Link: '+escapeHtml(data.ebay_link)+'">eBay Item &rarr;</a>' : '')
     + '<span class="stock-platform '+data.platform+'">'+data.platform.toUpperCase()+'</span>'
     + '<span class="stock-name" title="'+escapeHtml(data.status||'')+'">'+escapeHtml(name)+'</span>'
     + (priceStr ? '<span class="stock-price">'+priceStr+'</span>' : '')
@@ -1802,10 +1879,19 @@ function appendStockResult(data) {
 function downloadStockCSV() {
   const data = window._stockCSV || [];
   if (!data.length) return;
-  let csv = '\uFEFFS.No,Keyword,Link,Platform,ID,Name,Price JPY,Status,Available\\n';
+  let csv = '\uFEFFS.No,Keyword,eBay Link,Product Link,Platform,ID,Name,Price JPY,Status,Available\\n';
   for (const r of data) {
     if (r.complete) continue;
-    csv += ''+(r.s_no||'')+',"'+(r.keyword||'').replace(/"/g,'""')+'","'+(r.link||'').replace(/"/g,'""')+'","'+(r.platform||'')+'","'+(r.id||'')+'","'+(r.name||'').replace(/"/g,'""')+'",'+(r.price||'')+',"'+escapeHtml(r.status||'')+'","'+(r.available_text||'')+'"\\n';
+    csv += ''+(r.s_no||'')
+      + ',"'+(r.keyword||'').replace(/"/g,'""')+'"'
+      + ',"'+(r.ebay_link||'').replace(/"/g,'""')+'"'
+      + ',"'+(r.link||'').replace(/"/g,'""')+'"'
+      + ',"'+(r.platform||'')+'"'
+      + ',"'+(r.id||'')+'"'
+      + ',"'+(r.name||'').replace(/"/g,'""')+'"'
+      + ','+(r.price||'')
+      + ',"'+(r.status||'').replace(/"/g,'""')+'"'
+      + ',"'+(r.available_text||'')+'"\\n';
   }
   const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'stock_check_results.csv'; a.click();
@@ -2367,7 +2453,7 @@ def batch_translate(texts):
             'https://translate.googleapis.com/translate_a/single',
             params={'client': 'gtx', 'sl': 'ja', 'tl': 'en', 'dt': 't'},
             data={'q': joined},
-            timeout=15
+            timeout=3
         )
         resp.raise_for_status()
         data = resp.json()
@@ -2797,6 +2883,12 @@ def api_combined_bulk_search():
             return jsonify({'error': 'Keywords must be a non-empty array'}), 400
         per_keyword = int(data.get('per_keyword', 3))
         per_keyword = max(1, min(per_keyword, 10))
+        enable_mercari = data.get('enable_mercari', True)
+        enable_yahoo = data.get('enable_yahoo', True)
+        # Ensure at least one site is enabled
+        if not enable_mercari and not enable_yahoo:
+            enable_mercari = True
+            enable_yahoo = True
         mercari_status = data.get('mercari_status', 'all')
         mercari_condition = data.get('mercari_condition', '')
         yahoo_status = data.get('yahoo_status', 'live')
@@ -2866,28 +2958,32 @@ def api_combined_bulk_search():
                         break
 
                 if items:
-                    with ThreadPoolExecutor(max_workers=5) as info_pool:
-                        def enrich(item):
-                            try:
-                                full_info = getItemInfo(item['id'])
-                                if full_info is not None:
-                                    if hasattr(full_info, 'seller') and full_info.seller is not None:
-                                        item['seller_name'] = full_info.seller.name or ''
-                                        item['seller_reviews'] = full_info.seller.num_ratings or 0
-                                    if hasattr(full_info, 'item_condition') and full_info.item_condition is not None:
-                                        item['condition'] = full_info.item_condition.name or item['condition']
-                                        item['condition_en'] = COND_EN.get(item['condition'], item['condition'])
-                                    if hasattr(full_info, 'is_shop_item') and str(full_info.is_shop_item).lower() in ('true', '1'):
-                                        item['url'] = 'https://jp.mercari.com/shops/product/' + item['id']
-                            except Exception:
-                                item.setdefault('seller_name', '')
-                                item.setdefault('seller_reviews', 0)
-                            return item
-                        futures = [info_pool.submit(enrich, it) for it in items]
-                        items = [f.result() for f in as_completed(futures)]
-
                     if mercari_min_reviews > 0:
+                        with ThreadPoolExecutor(max_workers=5) as info_pool:
+                            def enrich(item):
+                                try:
+                                    full_info = getItemInfo(item['id'])
+                                    if full_info is not None:
+                                        if hasattr(full_info, 'seller') and full_info.seller is not None:
+                                            item['seller_name'] = full_info.seller.name or ''
+                                            item['seller_reviews'] = full_info.seller.num_ratings or 0
+                                        if hasattr(full_info, 'item_condition') and full_info.item_condition is not None:
+                                            item['condition'] = full_info.item_condition.name or item['condition']
+                                            item['condition_en'] = COND_EN.get(item['condition'], item['condition'])
+                                        if hasattr(full_info, 'is_shop_item') and str(full_info.is_shop_item).lower() in ('true', '1'):
+                                            item['url'] = 'https://jp.mercari.com/shops/product/' + item['id']
+                                except Exception:
+                                    item.setdefault('seller_name', '')
+                                    item.setdefault('seller_reviews', 0)
+                                return item
+                            futures = [info_pool.submit(enrich, it) for it in items]
+                            items = [f.result() for f in as_completed(futures)]
+
                         items = [it for it in items if it.get('seller_reviews', 0) >= mercari_min_reviews]
+                    else:
+                        for it in items:
+                            it.setdefault('seller_name', '')
+                            it.setdefault('seller_reviews', 0)
 
                     names = [it['name'] for it in items]
                     translations = batch_translate(names)
@@ -2943,7 +3039,7 @@ def api_combined_bulk_search():
                 return None, str(e) or 'eBay item fetch failed'
 
         def generate():
-            pool = ThreadPoolExecutor(max_workers=10)
+            pool = ThreadPoolExecutor(max_workers=20)
             ebay_token = None
             if any(ebay_links) and app_id and cert_id:
                 try:
@@ -2951,8 +3047,8 @@ def api_combined_bulk_search():
                 except Exception:
                     ebay_token = None
             try:
-                mercari_futures = {kw: pool.submit(search_mercari_kw, kw) for kw in keywords_list}
-                yahoo_futures = {kw: pool.submit(search_yahoo_kw, kw) for kw in keywords_list}
+                mercari_futures = {kw: pool.submit(search_mercari_kw, kw) for kw in keywords_list} if enable_mercari else {}
+                yahoo_futures = {kw: pool.submit(search_yahoo_kw, kw) for kw in keywords_list} if enable_yahoo else {}
                 ebay_futures = {}
                 if ebay_token:
                     for i, link in enumerate(ebay_links):
@@ -2960,8 +3056,14 @@ def api_combined_bulk_search():
                             ebay_futures[i] = pool.submit(fetch_ebay_ref, link, ebay_token)
                 deadline = _bulk_deadline(keywords_list)
                 for i, kw in enumerate(keywords_list):
-                    m_items, m_err = _take_future(mercari_futures[kw], deadline - time.monotonic(), 'Mercari search')
-                    y_items, y_err = _take_future(yahoo_futures[kw], deadline - time.monotonic(), 'Yahoo search')
+                    if enable_mercari:
+                        m_items, m_err = _take_future(mercari_futures[kw], deadline - time.monotonic(), 'Mercari search')
+                    else:
+                        m_items, m_err = [], None
+                    if enable_yahoo:
+                        y_items, y_err = _take_future(yahoo_futures[kw], deadline - time.monotonic(), 'Yahoo search')
+                    else:
+                        y_items, y_err = [], None
                     e_item, e_err, e_link = None, None, ebay_links[i] if i < len(ebay_links) else ''
                     if i in ebay_futures:
                         e_item, e_err = _take_future(ebay_futures[i], deadline - time.monotonic(), 'eBay item fetch')
@@ -2992,25 +3094,38 @@ def api_check_stock():
         data = request.get_json()
         if not data or 'links' not in data:
             return jsonify({'error': 'Links required'}), 400
-        links = data['links']
-        if not isinstance(links, list) or not links:
+        links_input = data['links']
+        if not isinstance(links_input, list) or not links_input:
             return jsonify({'error': 'Links must be a non-empty array'}), 400
-
         raw_keywords = data.get('keywords', [])
         if not isinstance(raw_keywords, list):
             raw_keywords = []
+        raw_ebay_links = data.get('ebay_links', [])
+        if not isinstance(raw_ebay_links, list):
+            raw_ebay_links = []
 
         import re
         link_pattern = re.compile(r'https?://[^\s]+?(?=https?://|$)')
-        raw_links = links
+        
         links = []
-        for l in raw_links[:200]:
-            for url in link_pattern.findall(l):
-                url = url.strip()
-                if url:
-                    links.append(url)
-        keywords = [k.strip() for k in raw_keywords[:200] if k.strip()]
-        keywords = keywords[:len(links)]
+        paired_keywords = []
+        paired_ebay_links = []
+        for idx, l in enumerate(links_input[:200]):
+            extracted = link_pattern.findall(l)
+            if extracted:
+                url = extracted[0].strip()
+                links.append(url)
+                kw = str(raw_keywords[idx]).strip() if idx < len(raw_keywords) and raw_keywords[idx] is not None else ''
+                eb = str(raw_ebay_links[idx]).strip() if idx < len(raw_ebay_links) and raw_ebay_links[idx] is not None else ''
+                paired_keywords.append(kw)
+                paired_ebay_links.append(eb)
+            elif l and str(l).strip():
+                url = str(l).strip()
+                links.append(url)
+                kw = str(raw_keywords[idx]).strip() if idx < len(raw_keywords) and raw_keywords[idx] is not None else ''
+                eb = str(raw_ebay_links[idx]).strip() if idx < len(raw_ebay_links) and raw_ebay_links[idx] is not None else ''
+                paired_keywords.append(kw)
+                paired_ebay_links.append(eb)
 
         def parse_link(link):
             yahoo_match = re.search(r'auctions\.yahoo\.co\.jp/(?:jp/)?auction/([a-zA-Z0-9_]+)', link)
@@ -3198,8 +3313,8 @@ def api_check_stock():
             has_sold = '売り切れ' in html or '在庫なし' in html or 'sold out' in html.lower()
             return {'title': title, 'price': 0, 'available': not has_sold}
 
-        def check_link(link, keyword=''):
-            base_result = {'link': link, 'keyword': keyword}
+        def check_link(link, keyword='', ebay_link=''):
+            base_result = {'link': link, 'keyword': keyword, 'ebay_link': ebay_link}
             platform, item_id = parse_link(link)
             if not platform:
                 return {**base_result, 'platform': 'unknown', 'error': 'Could not parse URL'}
@@ -3314,24 +3429,23 @@ def api_check_stock():
                 return {**base_result, 'error': str(e)}
 
         def generate():
-            from concurrent.futures import as_completed, TimeoutError as _TimeoutError
-            with ThreadPoolExecutor(max_workers=3) as pool:
-                fut_to_key = {}
+            from concurrent.futures import as_completed
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                fut_to_info = {}
                 for idx, link in enumerate(links):
-                    kw = keywords[idx] if idx < len(keywords) else ''
-                    fut = pool.submit(check_link, link, kw)
-                    fut_to_key[fut] = kw
-                try:
-                    for f in as_completed(fut_to_key, timeout=300):
-                        try:
-                            result = f.result(timeout=5)
-                        except Exception as exc:
-                            result = {'link': '', 'keyword': fut_to_key.get(f, ''), 'error': str(exc)}
-                        yield 'data: ' + json.dumps(result, ensure_ascii=False) + '\n\n'
-                except _TimeoutError:
-                    for f in list(fut_to_key):
-                        if not f.done():
-                            f.cancel()
+                    kw = paired_keywords[idx] if idx < len(paired_keywords) else ''
+                    eb = paired_ebay_links[idx] if idx < len(paired_ebay_links) else ''
+                    fut = pool.submit(check_link, link, kw, eb)
+                    fut_to_info[fut] = {'keyword': kw, 'link': link, 'ebay_link': eb}
+                
+                for f in as_completed(fut_to_info):
+                    try:
+                        result = f.result()
+                    except Exception as exc:
+                        info = fut_to_info.get(f, {})
+                        result = {'link': info.get('link', ''), 'keyword': info.get('keyword', ''), 'ebay_link': info.get('ebay_link', ''), 'error': str(exc)}
+                    yield 'data: ' + json.dumps(result, ensure_ascii=False) + '\n\n'
+
             yield 'data: ' + json.dumps({'complete': True, 'total': len(links)}, ensure_ascii=False) + '\n\n'
 
         return Response(stream_with_context(generate()), mimetype='text/event-stream')
