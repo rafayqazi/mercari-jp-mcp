@@ -27,8 +27,8 @@ HEADERS = {
 #  - HTTP 404 + real results page (soft-404 anti-bot, still valid results)
 #  - HTTP 404 + "no results" page (見つかりません = keyword has no listings)
 # Treat the first two as success and the last as a valid empty result.
-_RESULTS_MARKER = 'Product__imageLink'
-_NO_RESULTS_MARKERS = ('見つかりません', '検索結果がありません')
+_RESULTS_MARKERS = ('__NEXT_DATA__', 'Product__imageLink', 'auctionId', 'itemsState')
+_NO_RESULTS_MARKERS = ('見つかりません', '検索結果がありません', '一致する商品は見つかりませんでした')
 
 
 def get_session():
@@ -72,7 +72,9 @@ def _throttled_get(url, timeout=15):
 
 
 def _looks_like_results(body):
-    return body and _RESULTS_MARKER in body
+    if not body:
+        return False
+    return any(m in body for m in _RESULTS_MARKERS)
 
 
 def _looks_like_no_results(body):

@@ -3,6 +3,7 @@ import json
 from .client import fetch
 
 DETAIL_URL = 'https://page.auctions.yahoo.co.jp/auction/{item_id}'
+FLEAMARKET_URL = 'https://paypayfleamarket.yahoo.co.jp/item/{item_id}'
 
 
 def _extract_next_data(html: str) -> dict:
@@ -34,9 +35,6 @@ def _extract_json_ld(html: str) -> list:
 
 
 def get_item_detail(item_id: str) -> dict:
-    url = DETAIL_URL.format(item_id=item_id)
-    html = fetch(url)
-
     result = {
         'id': item_id,
         'title': '',
@@ -59,29 +57,56 @@ def get_item_detail(item_id: str) -> dict:
         'shipping': '',
     }
 
-    # Try __NEXT_DATA__ first (rich structured data)
+    # Decide order of URLs to fetch based on item_id pattern
+    # Fleamarket items commonly start with 'z'
+    urls_to_try = []
+    if item_id.startswith('z'):
+        urls_to_try = [
+            FLEAMARKET_URL.format(item_id=item_id),
+            DETAIL_URL.format(item_id=item_id)
+        ]
+    else:
+        urls_to_try = [
+            DETAIL_URL.format(item_id=item_id),
+            FLEAMARKET_URL.format(item_id=item_id)
+        ]
+
+    html = ''
+    for url in urls_to_try:
+        try:
+            h = fetch(url)
+            if h and len(h) > 500:
+                html = h
+                # If page contains explicit not found / 404 in NEXT_DATA, try fallback url
+                if '"error":{"status":404' in h:
+                    continue
+                break
+        except Exception:
+            continue
+
+    if not html:
+        return result
+
+    # 1. Try __NEXT_DATA__
     nd = _extract_next_data(html)
     if nd:
         try:
-            item = (
-                nd.get('props', {})
-                .get('pageProps', {})
-                .get('initialState', {})
-                .get('item', {})
-                .get('detail', {})
-                .get('item', {})
-            )
-            if item:
-                result['title'] = item.get('title', '')
-                result['price'] = item.get('price', 0)
-                result['buy_now_price'] = item.get('bidorbuy', None)
-                result['bid_count'] = item.get('bids', 0)
-                result['bidders'] = item.get('biddersNum', 0)
-                result['end_time'] = item.get('formattedEndTime', '')
-                result['end_timestamp'] = item.get('endTime', '')
-                result['left_time'] = ''
-                lt = item.get('leftTime', 0)
-                if lt:
+            props = nd.get('props', {})
+            page_props = props.get('pageProps', {})
+            init = page_props.get('initialState') or props.get('initialState', {})
+
+            # A. Yahoo Auctions detail structure
+            auction_item = init.get('item', {}).get('detail', {}).get('item', {})
+            if auction_item and isinstance(auction_item, dict):
+                result['title'] = auction_item.get('title', '')
+                result['price'] = auction_item.get('price', 0)
+                result['buy_now_price'] = auction_item.get('bidorbuy', None)
+                result['bid_count'] = auction_item.get('bids', 0)
+                result['bidders'] = auction_item.get('biddersNum', 0)
+                result['end_time'] = auction_item.get('formattedEndTime', '')
+                result['end_timestamp'] = auction_item.get('endTime', '')
+                lt = auction_item.get('leftTime', 0)
+                if lt and lt > 0:
                     days = int(lt // 86400)
                     hours = int((lt % 86400) // 3600)
                     parts = []
@@ -90,11 +115,13 @@ def get_item_detail(item_id: str) -> dict:
                     if hours:
                         parts.append(f'{hours}h')
                     result['left_time'] = ' '.join(parts)
-                result['status'] = item.get('status', '')
-                result['watchlist'] = item.get('watchListNum', 0)
-                result['shipping'] = item.get('chargeForShipping', '')
+                elif lt and lt <= 0:
+                    result['left_time'] = 'Ended'
+                result['status'] = auction_item.get('status', '')
+                result['watchlist'] = auction_item.get('watchListNum', 0)
+                result['shipping'] = auction_item.get('chargeForShipping', '')
 
-                seller = item.get('seller', {})
+                seller = auction_item.get('seller', {})
                 if seller:
                     result['seller_name'] = seller.get('displayName', '')
                     result['seller_id'] = seller.get('aucUserId', '')
@@ -102,20 +129,59 @@ def get_item_detail(item_id: str) -> dict:
                     result['seller_rating'] = rating.get('goodRating', '')
                     result['seller_reviews'] = rating.get('summary', 0)
 
-                images = item.get('img', [])
-                result['images'] = [img.get('image', '') for img in images if img.get('image')]
+                images = auction_item.get('img', [])
+                if isinstance(images, list):
+                    result['images'] = [
+                        img.get('image', '')
+                        for img in images
+                        if isinstance(img, dict) and img.get('image')
+                    ]
 
-                # Description is typically in the JSON-LD rather than __NEXT_DATA__
-        except (KeyError, TypeError) as e:
+            # B. PayPay Fleamarket structure
+            fleamarket_item = init.get('itemsState', {}).get('items', {}).get('item', {})
+            if fleamarket_item and isinstance(fleamarket_item, dict):
+                if not result['title']:
+                    result['title'] = fleamarket_item.get('title', '')
+                if not result['price']:
+                    result['price'] = fleamarket_item.get('price', 0)
+                    result['buy_now_price'] = fleamarket_item.get('price', 0)
+                if not result['status']:
+                    result['status'] = fleamarket_item.get('status', '')
+                if not result['description']:
+                    result['description'] = fleamarket_item.get('description', '')
+                seller = fleamarket_item.get('seller', {})
+                if seller and not result['seller_name']:
+                    result['seller_name'] = seller.get('name', '')
+                    result['seller_id'] = seller.get('id', '')
+                fimages = fleamarket_item.get('images', [])
+                if fimages and not result['images']:
+                    result['images'] = [
+                        img.get('url', '') if isinstance(img, dict) else str(img)
+                        for img in fimages
+                        if img
+                    ]
+        except (KeyError, TypeError):
             pass
 
-    # Try JSON-LD for description (__NEXT_DATA__ may not have it)
-    if not result['description']:
-        for ld in _extract_json_ld(html):
-            if ld.get('@type') == 'Product':
-                result['description'] = ld.get('description', '')
+    # 2. JSON-LD fallback for description, title, images, price, and condition
+    for ld in _extract_json_ld(html):
+        if ld.get('@type') == 'Product':
+            if not result['title'] and ld.get('name'):
+                result['title'] = ld['name']
+            if not result['description'] and ld.get('description'):
+                result['description'] = ld['description']
+            if not result['images'] and ld.get('image'):
+                imgs = ld['image']
+                result['images'] = imgs if isinstance(imgs, list) else [imgs]
+            offers = ld.get('offers', {})
+            if isinstance(offers, dict):
+                if not result['price'] and offers.get('price'):
+                    try:
+                        result['price'] = int(float(offers['price']))
+                    except (ValueError, TypeError):
+                        pass
                 if not result['condition']:
-                    cond_url = ld.get('offers', {}).get('itemCondition', '')
+                    cond_url = offers.get('itemCondition', '')
                     cond_map = {
                         'newcondition': 'New',
                         'usedcondition': 'Used',
@@ -126,5 +192,30 @@ def get_item_detail(item_id: str) -> dict:
                         if key in cond_url.lower():
                             result['condition'] = val
                             break
+
+    # 3. HTML meta tag fallback
+    if not result['title']:
+        m = re.search(r'<meta property="og:title" content="([^"]+)"', html)
+        if m:
+            t = m.group(1)
+            t = re.sub(r'\s*-\s*Yahoo!オークション.*$', '', t)
+            result['title'] = t.strip()
+        else:
+            m2 = re.search(r'<title>(.*?)</title>', html)
+            if m2:
+                t = m2.group(1)
+                t = re.sub(r'Yahoo!オークション\s*-\s*', '', t)
+                t = re.sub(r'\s*-\s*Yahoo!オークション.*$', '', t)
+                result['title'] = t.strip()
+
+    if not result['images']:
+        m = re.search(r'<meta property="og:image" content="([^"]+)"', html)
+        if m:
+            result['images'] = [m.group(1)]
+
+    if not result['description']:
+        m = re.search(r'<meta property="og:description" content="([^"]+)"', html)
+        if m:
+            result['description'] = m.group(1)
 
     return result

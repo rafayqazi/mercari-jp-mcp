@@ -116,7 +116,12 @@ The server automatically limits API pagination (`max_items`) for faster response
 
 The app uses the [mercari](https://github.com/marvinody/mercari/) library (MIT license) to interface with Mercari Japan's public API. Search results are parsed, filtered, and optionally translated via Google Translate API.
 
+## Documentation
+
+- [Yahoo! Auctions Architecture & Scraping Guide](YAHOO_AUCTIONS_ARCHITECTURE.md) — Detailed guide covering Next.js `__NEXT_DATA__` schemas, endpoint rules, field mappings, anti-bot handling, and debugging instructions.
+
 ## Acknowledgments
 
 - [marvinody/mercari](https://github.com/marvinody/mercari/) — Mercari API client
 - [jlowin/fastmcp](https://github.com/jlowin/fastmcp) — MCP framework
+
