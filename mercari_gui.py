@@ -122,6 +122,15 @@ HTML_PAGE = u'''<!DOCTYPE html>
   .bulk-result-body .result-card .result-name { font-size: 13px; }
   .dl-btn { padding: 8px 16px; background: #333; color: white; border: none; border-radius: 6px; font-size: 13px; cursor: pointer; margin-top: 8px; }
   .dl-btn:hover { background: #555; }
+  .sheet-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 16px; margin-bottom: 12px; background: white; border: 1px solid #eee; border-radius: 8px; }
+  .sheet-count { font-size: 13px; color: #555; font-weight: 600; }
+  .sheet-download { padding: 8px 14px; background: #2e7d32; color: white; border: none; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .sheet-download:hover:not(:disabled) { background: #256528; }
+  .sheet-download:disabled { background: #bbb; cursor: not-allowed; }
+  .result-link.sheet-add-btn { border: 1px solid #2e7d32; color: #2e7d32; background: white; cursor: pointer; }
+  .result-link.sheet-add-btn:hover { background: #2e7d32; color: white; }
+  .toast { position: fixed; left: 50%; bottom: 24px; z-index: 2000; transform: translate(-50%, 20px); opacity: 0; padding: 12px 20px; border-radius: 8px; background: #2e7d32; color: white; font-size: 14px; font-weight: 600; box-shadow: 0 4px 16px rgba(0,0,0,0.2); pointer-events: none; transition: opacity 0.2s, transform 0.2s; }
+  .toast.visible { opacity: 1; transform: translate(-50%, 0); }
   .retry-btn { border: 1px solid #ea352d !important; color: #ea352d !important; background: #fff !important; cursor: pointer; font-size: 12px; padding: 6px 12px; border-radius: 6px; display: inline-flex; align-items: center; gap: 4px; }
   .retry-btn:hover { background: #ea352d !important; color: #fff !important; }
   .retry-btn.loading { opacity: 0.6; cursor: progress; }
@@ -607,10 +616,15 @@ HTML_PAGE = u'''<!DOCTYPE html>
       <div class="bulk-keyword-count" id="combinedCount"></div>
     </div>
   </div>
+  <div class="sheet-toolbar" aria-live="polite">
+    <span class="sheet-count" id="combinedSheetCount">Added to sheet: 0</span>
+    <button class="sheet-download" id="combinedSheetDownload" onclick="downloadCombinedSheetCSV()" disabled>Download CSV</button>
+  </div>
   <div id="combinedResults">
     <div class="status"><div class="emoji">&#x1F50D;</div><p>Enter keywords and click Search Both</p></div>
   </div>
 </div>
+<div class="toast" id="sheetToast" role="status" aria-live="polite"></div>
 <div class="tab-content" id="tabEbay">
   <div class="card">
     <div class="form-row">
@@ -1562,6 +1576,67 @@ function updateCombinedCount() {
   document.getElementById('combinedCount').innerHTML = msg;
 }
 
+const _supplierSheet = [];
+let _sheetToastTimer;
+
+function escapeAttribute(value) {
+  return escapeHtml(String(value || '')).replace(/"/g, '&quot;');
+}
+
+function getEbayItemNumber(link) {
+  const match = String(link || '').match(/(?:^|\/)(\d{9,14})(?=$|[/?#])/);
+  return match ? match[1] : '';
+}
+
+function buildAddToSheetButton(keyword, supplierUrl, ebayLink) {
+  if (!supplierUrl) return '';
+  return '<button type="button" class="result-link sheet-add-btn" data-sheet-keyword="'+escapeAttribute(keyword)+'" data-sheet-url="'+escapeAttribute(supplierUrl)+'" data-ebay-item-number="'+escapeAttribute(getEbayItemNumber(ebayLink))+'">Add to Sheet</button>';
+}
+
+function updateSupplierSheetCount() {
+  document.getElementById('combinedSheetCount').textContent = 'Added to sheet: '+_supplierSheet.length;
+  document.getElementById('combinedSheetDownload').disabled = !_supplierSheet.length;
+}
+
+function showSheetToast(message) {
+  const toast = document.getElementById('sheetToast');
+  toast.textContent = message;
+  toast.classList.add('visible');
+  clearTimeout(_sheetToastTimer);
+  _sheetToastTimer = setTimeout(function() { toast.classList.remove('visible'); }, 2500);
+}
+
+function addSupplierToSheet(button) {
+  const keyword = button.getAttribute('data-sheet-keyword');
+  const supplierUrl = button.getAttribute('data-sheet-url');
+  const ebayItemNumber = button.getAttribute('data-ebay-item-number') || '';
+  if (!keyword || !supplierUrl) {
+    showError('Could not add this item because its keyword or supplier link is missing');
+    return;
+  }
+  _supplierSheet.push({ebayItemNumber: ebayItemNumber, keyword: keyword, supplierUrl: supplierUrl});
+  updateSupplierSheetCount();
+  showSheetToast('Successfully added to sheet');
+}
+
+function downloadCombinedSheetCSV() {
+  if (!_supplierSheet.length) return;
+  const quoteCsvCell = function(value) {
+    return '"'+String(value || '').replace(/"/g, '""')+'"';
+  };
+  let csv = '\uFEFFeBay Item Number,Keyword,Supplier Link\\n';
+  for (const row of _supplierSheet) {
+    csv += quoteCsvCell(row.ebayItemNumber)+','+quoteCsvCell(row.keyword)+','+quoteCsvCell(row.supplierUrl)+'\\n';
+  }
+  const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'supplier_sheet.csv';
+  a.click();
+  setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+}
+
 async function handleCombinedFile(e) {
   const file = e.target.files[0];
   if (!file) return;
@@ -1697,6 +1772,7 @@ function buildCombinedGroup(kw, mercariItems, yahooItems, mErr, yErr, gid, ebayI
         + '<button class="result-link desc-btn" data-item-id="'+escapeHtml(item.id)+'">Description</button>'
         + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View</a>'
         + '<button class="result-link ebay-search-btn" data-kw="'+escapeHtml(kw)+'" onclick="searchEbayForKeyword(this)">Search eBay</button>'
+        + buildAddToSheetButton(kw, item.url, ebayLink)
         + '</div></div>';
     }
   } else {
@@ -1733,6 +1809,7 @@ function buildCombinedGroup(kw, mercariItems, yahooItems, mErr, yErr, gid, ebayI
         + '<button class="result-link desc-btn" data-yahoo-id="'+escapeHtml(item.id)+'">Detail</button>'
         + '<a class="result-link" href="'+escapeHtml(item.url)+'" target="_blank" rel="noopener">View</a>'
         + '<button class="result-link ebay-search-btn" data-kw="'+escapeHtml(kw)+'" onclick="searchEbayForKeyword(this)">Search eBay</button>'
+        + buildAddToSheetButton(kw, item.url, ebayLink)
         + '</div></div>';
     }
   } else {
@@ -2229,6 +2306,11 @@ function downloadEbayBulkCSV() {
 
 // Event delegation for description buttons
 document.addEventListener('click', function(e) {
+  const sheetBtn = e.target.closest('.sheet-add-btn');
+  if (sheetBtn) {
+    addSupplierToSheet(sheetBtn);
+    return;
+  }
   const mercariBtn = e.target.closest('[data-item-id]');
   if (mercariBtn) {
     fetchDescription(mercariBtn.getAttribute('data-item-id'));

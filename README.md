@@ -9,6 +9,7 @@ A Python application to search Mercari Japan, Yahoo Auctions, and eBay products 
 - **Yahoo Auctions Simple Search** — Search Yahoo Auctions with price range, status (live/sold), condition, sort, and BIN-only filters
 - **Yahoo Auctions Bulk Search** — Multi-keyword Yahoo Auctions search with CSV export
 - **Combined Mercari + Yahoo Bulk Search** — Search both platforms simultaneously with per-keyword results shown side-by-side
+- **Supplier Sheet** — Add Mercari or Yahoo supplier links from combined bulk results to a CSV with the eBay reference item number, keyword, and supplier link
 - **eBay Simple Search** — Search eBay with keyword, price, condition, sort, and site (US/UK/DE/JP/etc.)
 - **eBay Bulk Search** — Multi-keyword eBay search with CSV export
 - **Filters** — Price range, item status, condition, seller review count (Mercari bulk), sort order, BIN-only (Yahoo/eBay)
@@ -58,6 +59,7 @@ The GUI has seven tabs:
 - **Yahoo Auctions** — Single keyword search on Yahoo Auctions with price range, status (live/sold), condition, sort order, and BIN-only filter
 - **Yahoo Bulk** — Multi-keyword Yahoo Auctions search with file upload support and CSV export
 - **Mercari + Yahoo Bulk** — Search both platforms at once. Results are displayed side-by-side per keyword with Mercari on the left and Yahoo on the right.
+- In **Mercari + Yahoo Bulk**, click **Add to Sheet** on any Mercari or Yahoo result to save its eBay reference item number, keyword, and supplier link. The sheet count updates immediately, and **Download CSV** exports all added rows.
 - **eBay Search** — Search eBay by keyword with price range, condition, sort, and site selection (US/UK/Japan/etc.). Requires an eBay App ID.
 - **eBay Bulk** — Multi-keyword eBay search with file upload and CSV export.
 
@@ -124,4 +126,3 @@ The app uses the [mercari](https://github.com/marvinody/mercari/) library (MIT l
 
 - [marvinody/mercari](https://github.com/marvinody/mercari/) — Mercari API client
 - [jlowin/fastmcp](https://github.com/jlowin/fastmcp) — MCP framework
-
